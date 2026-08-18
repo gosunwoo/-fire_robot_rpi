@@ -30,6 +30,54 @@ class LidarCluster:
 
 
 @dataclass
+class InspectionWindow:
+    settle_sec: float
+    timeout_sec: float
+    required_hits: int
+    confirmation_sec: float
+    candidate: Optional[LidarCluster] = None
+    started_at: float = 0.0
+    matched_hits: int = 0
+    first_match_at: Optional[float] = None
+
+    def begin(self, candidate: LidarCluster, now: float) -> None:
+        self.candidate = candidate
+        self.started_at = float(now)
+        self.matched_hits = 0
+        self.first_match_at = None
+
+    def clear(self) -> None:
+        self.candidate = None
+        self.matched_hits = 0
+        self.first_match_at = None
+
+    def evaluate(self, now: float, matched: bool) -> str:
+        if self.candidate is None:
+            return "IDLE"
+        now = float(now)
+        if now - self.started_at < self.settle_sec:
+            return "SETTLING"
+        if matched:
+            if self.first_match_at is None:
+                self.first_match_at = now
+                self.matched_hits = 1
+            else:
+                self.matched_hits += 1
+            if (
+                self.matched_hits >= self.required_hits
+                and now - self.first_match_at >= self.confirmation_sec
+            ):
+                return "PERSON"
+        else:
+            self.matched_hits = 0
+            self.first_match_at = None
+        if now - self.started_at >= self.timeout_sec:
+            return "OBSTACLE"
+        return "INSPECTING"
+
+
+
+@dataclass
 class EvidenceTrack:
     x: float
     y: float
@@ -136,6 +184,53 @@ def select_unique_range_match(
     ):
         return None
     return matches[0]
+
+
+def select_forward_inspection_cluster(
+    points: Sequence[XY],
+    *,
+    robot_x: float,
+    robot_y: float,
+    sensor_yaw_rad: float,
+    horizontal_fov_rad: float,
+    min_range_m: float,
+    max_range_m: float,
+    cluster_radius_m: float,
+    excluded_positions: Sequence[XY] = (),
+    exclusion_radius_m: float = 0.60,
+    ambiguity_margin_m: float = 0.35,
+) -> Optional[LidarCluster]:
+    """Pick one nearest confirmed front obstacle for stopped inspection."""
+
+    options = []
+    for members in cluster_points(points, cluster_radius_m):
+        x = sum(point[0] for point in members) / len(members)
+        y = sum(point[1] for point in members) / len(members)
+        if any(
+            math.hypot(x - px, y - py) <= exclusion_radius_m
+            for px, py in excluded_positions
+        ):
+            continue
+        distance = math.hypot(x - robot_x, y - robot_y)
+        if not min_range_m <= distance <= max_range_m:
+            continue
+        bearing = math.atan2(y - robot_y, x - robot_x)
+        error = math.atan2(
+            math.sin(bearing - sensor_yaw_rad),
+            math.cos(bearing - sensor_yaw_rad),
+        )
+        if abs(error) > horizontal_fov_rad / 2.0:
+            continue
+        options.append(LidarCluster(x, y, len(members), distance, 0.0))
+    options.sort(key=lambda item: item.range_m)
+    if not options:
+        return None
+    if (
+        len(options) > 1
+        and options[1].range_m - options[0].range_m < ambiguity_margin_m
+    ):
+        return None
+    return options[0]
 
 
 class RescueeTracker:
@@ -308,6 +403,7 @@ class VictimFusionNode(Node):
             'cluster_radius_m': 0.22,
             'min_cluster_points': 2,
             'max_cluster_points': 15,
+            'max_follow_cluster_points': 80,
             'victim_follow_radius_m': 0.65,
             'victim_follow_ambiguity_margin_m': 0.15,
             'victim_history_spacing_m': 0.10,
@@ -322,6 +418,14 @@ class VictimFusionNode(Node):
             'victim_merge_radius_m': 0.55,
             'red_suppression_radius_m': 0.50,
             'victim_marker_diameter_m': 0.75,
+            'inspection_min_range_m': 1.5,
+            'inspection_max_range_m': 4.0,
+            'inspection_settle_sec': 1.0,
+            'inspection_timeout_sec': 4.0,
+            'inspection_confirmation_hits': 3,
+            'inspection_confirmation_sec': 0.5,
+            'inspection_reject_hold_sec': 60.0,
+            'inspection_reject_radius_m': 0.60,
             'publish_rate_hz': 2.0,
         }
         for name, value in defaults.items():
@@ -343,6 +447,9 @@ class VictimFusionNode(Node):
         self.cluster_radius = float(self.get_parameter('cluster_radius_m').value)
         self.min_cluster_points = int(self.get_parameter('min_cluster_points').value)
         self.max_cluster_points = int(self.get_parameter('max_cluster_points').value)
+        self.max_follow_cluster_points = int(
+            self.get_parameter('max_follow_cluster_points').value
+        )
         self.victim_follow_radius = float(
             self.get_parameter('victim_follow_radius_m').value
         )
@@ -370,6 +477,29 @@ class VictimFusionNode(Node):
         self.marker_diameter = float(
             self.get_parameter('victim_marker_diameter_m').value
         )
+        self.inspection_min_range = float(
+            self.get_parameter('inspection_min_range_m').value
+        )
+        self.inspection_max_range = float(
+            self.get_parameter('inspection_max_range_m').value
+        )
+        self.inspection_reject_hold = float(
+            self.get_parameter('inspection_reject_hold_sec').value
+        )
+        self.inspection_reject_radius = float(
+            self.get_parameter('inspection_reject_radius_m').value
+        )
+        inspection_hits = int(
+            self.get_parameter('inspection_confirmation_hits').value
+        )
+        self.inspection = InspectionWindow(
+            settle_sec=float(self.get_parameter('inspection_settle_sec').value),
+            timeout_sec=float(self.get_parameter('inspection_timeout_sec').value),
+            required_hits=inspection_hits,
+            confirmation_sec=float(
+                self.get_parameter('inspection_confirmation_sec').value
+            ),
+        )
         rate = float(self.get_parameter('publish_rate_hz').value)
         numeric = (
             self.mmwave_stale_timeout, self.max_match_distance,
@@ -378,14 +508,21 @@ class VictimFusionNode(Node):
             self.maximum_tolerance, self.ambiguity_margin,
             self.victim_follow_radius,
             self.victim_follow_ambiguity_margin, self.victim_history_spacing,
-            self.red_suppression_radius, self.marker_diameter, rate,
+            self.red_suppression_radius, self.marker_diameter,
+            self.inspection_min_range, self.inspection_max_range,
+            self.inspection_reject_hold, self.inspection_reject_radius,
+            self.inspection.settle_sec, self.inspection.timeout_sec,
+            self.inspection.confirmation_sec, rate,
         )
         if (
             not self.fixed_frame
             or not self.base_frame
             or self.min_cluster_points < 2
             or self.max_cluster_points < self.min_cluster_points
+            or self.max_follow_cluster_points < self.max_cluster_points
             or any(value <= 0.0 for value in numeric)
+            or self.inspection_min_range >= self.inspection_max_range
+            or self.inspection.required_hits < 2
             or not math.isfinite(self.sensor_yaw_offset)
             or not 0.0 < self.sensor_horizontal_fov <= 2.0 * math.pi
         ):
@@ -416,6 +553,9 @@ class VictimFusionNode(Node):
         )
         self.victim_detected_publisher = self.create_publisher(
             Bool, '/victim_detected', qos
+        )
+        self.inspection_hold_publisher = self.create_publisher(
+            Bool, '/mode3_inspection_hold', qos
         )
         self.create_subscription(
             MarkerArray, '/dynamic_obstacle_markers', self._dynamic_callback, qos
@@ -452,6 +592,8 @@ class VictimFusionNode(Node):
         self.distance_updated = float('-inf')
         self.last_dynamic: Optional[MarkerArray] = None
         self.victim_history: List[XY] = []
+        self.rejected_inspections: List[Tuple[float, float, float]] = []
+        self.inspection_hold = False
         self.create_timer(1.0 / rate, self._publish_victims)
         self._publish_victims()
 
@@ -479,11 +621,125 @@ class VictimFusionNode(Node):
             and now - self.distance_updated <= self.mmwave_stale_timeout
         )
 
+    def _robot_pose(self):
+        try:
+            transform = self.buffer.lookup_transform(
+                self.fixed_frame, self.base_frame, rclpy.time.Time()
+            )
+        except TransformException:
+            return None
+        origin = transform.transform.translation
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        return float(origin.x), float(origin.y), yaw
+
+    def _set_inspection_hold(self, enabled: bool) -> None:
+        self.inspection_hold = bool(enabled)
+        self.inspection_hold_publisher.publish(
+            Bool(data=self.inspection_hold)
+        )
+
+    def _cancel_inspection(self, clear_rejections: bool = False) -> None:
+        self.inspection.clear()
+        self._set_inspection_hold(False)
+        if clear_rejections:
+            self.rejected_inspections.clear()
+
+    def _consider_inspection(self, message: MarkerArray) -> None:
+        if self.drive_mode != 3 or self.inspection.candidate is not None:
+            return
+        pose = self._robot_pose()
+        if pose is None:
+            return
+        now = time.monotonic()
+        self.rejected_inspections = [
+            item for item in self.rejected_inspections
+            if now - item[2] <= self.inspection_reject_hold
+        ]
+        excluded = list(self.tracker.victims) + [
+            (x, y) for x, y, _ in self.rejected_inspections
+        ]
+        candidate = select_forward_inspection_cluster(
+            extract_dynamic_points(message),
+            robot_x=pose[0],
+            robot_y=pose[1],
+            sensor_yaw_rad=pose[2] + self.sensor_yaw_offset,
+            horizontal_fov_rad=self.sensor_horizontal_fov,
+            min_range_m=self.inspection_min_range,
+            max_range_m=self.inspection_max_range,
+            cluster_radius_m=self.cluster_radius,
+            excluded_positions=excluded,
+            exclusion_radius_m=self.inspection_reject_radius,
+            ambiguity_margin_m=self.ambiguity_margin,
+        )
+        if candidate is None:
+            return
+        self.inspection.begin(candidate, now)
+        self._set_inspection_hold(True)
+        self.status_publisher.publish(
+            String(data=f'INSPECTING:{candidate.range_m:.2f}')
+        )
+        self.get_logger().warning(
+            f'DYNAMIC INSPECTION HOLD: lidar={candidate.range_m:.2f}m'
+        )
+
+    def _advance_inspection(self, now: float) -> None:
+        candidate = self.inspection.candidate
+        if candidate is None:
+            return
+        tolerance = min(
+            self.maximum_tolerance,
+            max(
+                self.distance_tolerance,
+                candidate.range_m * self.relative_tolerance,
+            ),
+        )
+        matched = (
+            self._mmwave_ready(now)
+            and self.mmwave_distance is not None
+            and abs(self.mmwave_distance - candidate.range_m) <= tolerance
+        )
+        decision = self.inspection.evaluate(now, matched)
+        if decision == 'PERSON':
+            victim = (candidate.x, candidate.y)
+            if not self.tracker._near(
+                candidate.x, candidate.y,
+                self.tracker.victims, self.tracker.merge_radius,
+            ):
+                self.tracker.victims.append(victim)
+                self.victim_history.append(victim)
+            self.get_logger().warning(
+                'RESCUEE INFERRED AFTER STOP at '
+                f'({candidate.x:.2f}, {candidate.y:.2f}); '
+                f'lidar={candidate.range_m:.2f}m, '
+                f'mmwave={self.mmwave_distance:.2f}m'
+            )
+            self.status_publisher.publish(
+                String(data=f'DETECTED:{candidate.x:.2f},{candidate.y:.2f}')
+            )
+            self._cancel_inspection()
+        elif decision == 'OBSTACLE':
+            self.rejected_inspections.append(
+                (candidate.x, candidate.y, float(now))
+            )
+            self.status_publisher.publish(
+                String(data=f'OBSTACLE:{candidate.range_m:.2f}')
+            )
+            self.get_logger().info(
+                f'NON-PERSON OBSTACLE: lidar={candidate.range_m:.2f}m; '
+                'avoidance resumed'
+            )
+            self._cancel_inspection()
+
     def _mode_callback(self, message: Int32) -> None:
         mode = int(message.data)
         if mode not in (1, 2, 3) or mode == self.drive_mode:
             return
         self.drive_mode = mode
+        self._cancel_inspection(clear_rejections=True)
         self.last_dynamic = None
         self._publish_dynamic_display()
         self._publish_victims()
@@ -500,6 +756,7 @@ class VictimFusionNode(Node):
             return
         self.tracker.clear()
         self.victim_history.clear()
+        self._cancel_inspection(clear_rejections=True)
         self.status_publisher.publish(String(data=f'CLEARED:{state}'))
         self._publish_dynamic_display()
         self._publish_victims()
@@ -507,6 +764,7 @@ class VictimFusionNode(Node):
     def _dynamic_callback(self, message: MarkerArray) -> None:
         self.last_dynamic = message
         self._publish_dynamic_display()
+        self._consider_inspection(message)
 
     def _observation_callback(self, message: MarkerArray) -> None:
         if self.drive_mode != 3:
@@ -518,7 +776,7 @@ class VictimFusionNode(Node):
             points,
             cluster_radius_m=self.cluster_radius,
             min_cluster_points=self.min_cluster_points,
-            max_cluster_points=self.max_cluster_points,
+            max_cluster_points=self.max_follow_cluster_points,
             follow_radius_m=self.victim_follow_radius,
             ambiguity_margin_m=self.victim_follow_ambiguity_margin,
         )
@@ -588,6 +846,7 @@ class VictimFusionNode(Node):
         count = len(self.tracker.victims)
         self.tracker.clear()
         self.victim_history.clear()
+        self._cancel_inspection(clear_rejections=True)
         self.status_publisher.publish(String(data='CLEARED:MANUAL'))
         self._publish_dynamic_display()
         self._publish_victims()
@@ -616,6 +875,10 @@ class VictimFusionNode(Node):
         self.red_publisher.publish(display)
 
     def _publish_victims(self) -> None:
+        self._advance_inspection(time.monotonic())
+        self.inspection_hold_publisher.publish(
+            Bool(data=self.inspection_hold)
+        )
         stamp = self.get_clock().now().to_msg()
         clear = Marker()
         clear.header.frame_id = self.fixed_frame

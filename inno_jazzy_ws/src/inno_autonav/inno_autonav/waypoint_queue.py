@@ -303,7 +303,7 @@ class WaypointQueue(Node):
 
     def _command(self, message):
         command = message.data.strip().upper()
-        if command == 'CLEAR':
+        if command == "CLEAR":
             self.queue.clear()
             self.current_index = None
             self.waiting_for_departure = False

@@ -31,6 +31,7 @@ public:
   std::string         init_pose_from_topic;
 
   sensor_msgs::msg::LaserScan                     last_scan;
+  rclcpp::Time                                    last_scan_received_time;
   bool                                            GT_pose_initialized;
   std::shared_ptr<tf2_ros::Buffer>                buffer_;
   std::shared_ptr<tf2_ros::TransformListener>     tf_listener_;  

@@ -19,6 +19,7 @@ FILTERED_PRESENCE_TOPIC = '/mmwave/filtered_presence'
 FILTERED_DISTANCE_TOPIC = '/mmwave/filtered_distance_m'
 DYNAMIC_OBSTACLE_TOPIC = '/dynamic_obstacle_detected'
 VICTIM_FUSION_TOPIC = '/victim_fusion_status'
+THERMAL_ROUTE_TOPIC = "/thermal_route_status"
 
 
 def waypoint_log_text(state: str) -> Optional[str]:
@@ -82,6 +83,7 @@ class StatusConsole(Node):
         self._pending_detection = False
         self._dynamic_detected = False
         self._victim_state: Optional[str] = None
+        self._thermal_route_state: Optional[str] = None
 
         self.create_subscription(
             String, '/drive_mode_status', self._on_drive_mode, 10
@@ -110,6 +112,9 @@ class StatusConsole(Node):
         )
         self.create_subscription(
             String, VICTIM_FUSION_TOPIC, self._on_victim_fusion, 10
+        )
+        self.create_subscription(
+            String, THERMAL_ROUTE_TOPIC, self._on_thermal_route, 10
         )
         self._detection_timer = self.create_timer(
             self.detection_distance_wait, self._flush_pending_detection
@@ -173,7 +178,8 @@ class StatusConsole(Node):
         important = {
             'EMERGENCY_STOP': '전방 안전 정지',
             'NO_PATH': '주행 가능한 경로 없음',
-            'ROTATION_BLOCKED': '제자리 회전 공간 부족',
+            "ROTATION_BLOCKED": "제자리 회전 공간 부족",
+            "ROTATION_ODOMETRY_STALE": "회전각 갱신 없음 - 안전 정지",
         }
         if self._mode in (2, 3) and state in important:
             self._write(f'[주행 경고] {important[state]}')
@@ -202,7 +208,22 @@ class StatusConsole(Node):
         if not state or state == self._victim_state:
             return
         self._victim_state = state
-        if self._mode != 3 or not state.upper().startswith('DETECTED:'):
+        if self._mode != 3:
+            return
+        upper = state.upper()
+        if upper.startswith('INSPECTING:'):
+            try:
+                distance = float(state.split(':', 1)[1])
+                self._write(
+                    f'[판별] 동적 후보 {distance:.1f}m - 정지 후 MMWAVE 확인 중'
+                )
+            except (TypeError, ValueError):
+                self._write('[판별] 정지 후 MMWAVE 확인 중')
+            return
+        if upper.startswith('OBSTACLE:'):
+            self._write('[판별] 사람 아님 - 동적장애물 회피 재개')
+            return
+        if not upper.startswith('DETECTED:'):
             return
         try:
             coordinates = state.split(':', 1)[1]
@@ -213,6 +234,15 @@ class StatusConsole(Node):
             )
         except (TypeError, ValueError):
             self._write('[요구조자] 확정됨')
+
+    def _on_thermal_route(self, message: String) -> None:
+        state = message.data.strip().upper()
+        if not state or state == self._thermal_route_state:
+            return
+        self._thermal_route_state = state
+        if self._mode == 3 and state == "THERMAL_DANGER:EXIT3":
+            self._write("이동경로 중 온도 증가 감지! ->exit2 danger expected")
+            self._write("exit3으로 경로를 변경합니다.")
 
     @staticmethod
     def _valid_distance(value: float) -> bool:

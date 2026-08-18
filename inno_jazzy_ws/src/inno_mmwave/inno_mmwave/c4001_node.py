@@ -526,9 +526,18 @@ class C4001Node(Node):
             reference = self._data_wait_started
         if reference is None or now - reference <= self.stale_timeout_sec:
             return
-        if self._sensor_state != 'OFFLINE':
-            self._reset_filter_and_publish(now, 'sensor_stale')
+        if self._sensor_state == 'OFFLINE':
+            return
+        self._reset_filter_and_publish(now, 'sensor_stale')
         self._set_sensor_state('OFFLINE')
+        # A stale but still-open tty does not raise SerialException. Close it
+        # explicitly so the normal reconnect path reopens UART and sends
+        # sensorStart again. This repeats for the lifetime of the mission.
+        self._close_serial()
+        self._initialization_complete = False
+        self._last_frame_monotonic = None
+        self._data_wait_started = None
+        self._next_connect_monotonic = now + self.reconnect_interval_sec
 
     def _close_serial(self) -> None:
         port = self._serial

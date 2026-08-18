@@ -112,6 +112,21 @@ def simplify_path(
     return simplified
 
 
+def remaining_path_from_nearest(path: List[Cell], current: Cell) -> List[Cell]:
+    """Drop cells already passed so obstacles behind cannot trigger replans."""
+
+    if not path:
+        return []
+    nearest = min(
+        range(len(path)),
+        key=lambda index: (
+            (path[index][0] - current[0]) ** 2
+            + (path[index][1] - current[1]) ** 2
+        ),
+    )
+    return path[nearest:]
+
+
 def message_to_grid(message: OccupancyGrid) -> MapGrid:
     width, height = int(message.info.width), int(message.info.height)
     if width <= 0 or height <= 0 or len(message.data) != width * height:
@@ -289,17 +304,30 @@ class AstarReplanner(Node):
         self._stop_if_current_path_blocked()
 
     def _stop_if_current_path_blocked(self) -> None:
-        if (
-            self._waiting_dynamic_replan
-            or self.goal is None
-            or self.combined_grid is None
-            or not self.current_path_cells
-            or not path_cells_collision(
-                self.current_path_cells,
-                self.combined_grid.data,
-                self.unknown_is_occupied,
-            )
+        if self._waiting_dynamic_replan or self.goal is None:
+            return
+        if self.combined_grid is None or not self.current_path_cells:
+            return
+        path_to_check = self.current_path_cells
+        tf_helper = getattr(self, 'tf', None)
+        pose = (
+            tf_helper.lookup_pose_2d(self.map_frame, self.base_frame)
+            if tf_helper is not None else None
+        )
+        if pose is not None:
+            current = world_to_grid(pose[0], pose[1], self.combined_grid)
+            path_to_check = remaining_path_from_nearest(path_to_check, current)
+        if not path_cells_collision(
+            path_to_check,
+            self.combined_grid.data,
+            self.unknown_is_occupied,
         ):
+            # Off-path scan jitter must not replace an otherwise valid route.
+            self._dirty = False
+            return
+        if self.dynamic_replan_stop <= 0.0:
+            self._state('REPLANNING')
+            self._plan('DYNAMIC_BLOCKED')
             return
         self._waiting_dynamic_replan = True
         self._replan_not_before = time.monotonic() + self.dynamic_replan_stop
@@ -369,7 +397,7 @@ class AstarReplanner(Node):
         self._plan('NEW_GOAL')
 
     def _timer_callback(self) -> None:
-        if self.goal is None:
+        if self.goal is None or not self._dirty:
             return
         if (
             self._waiting_dynamic_replan
@@ -435,6 +463,9 @@ class AstarReplanner(Node):
         )
         if not path:
             self.current_path_cells = []
+            # Retry only after the grid actually changes, rather than issuing
+            # NO_PATH and stop commands at the periodic timer rate.
+            self._dirty = False
             self._state('NO_PATH')
             self._publish_empty_path()
             self.get_logger().error(f'A* 경로 없음: start={start}, goal={goal}')

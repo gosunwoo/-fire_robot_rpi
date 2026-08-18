@@ -168,5 +168,3 @@ if __name__ == '__main__':
             thermal_ros_node.destroy_node()
         if rclpy is not None and rclpy.ok():
             rclpy.shutdown()
-
-

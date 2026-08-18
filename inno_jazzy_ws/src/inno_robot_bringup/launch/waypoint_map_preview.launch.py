@@ -63,7 +63,9 @@ def generate_launch_description():
             {
                 'load_file': L('waypoint_file'),
                 'save_file': L('waypoint_save_file'),
-                'replace_waypoint_numbers': L('replace_waypoint_numbers'),
+                "replace_waypoint_numbers": ParameterValue(
+                    L("replace_waypoint_numbers"), value_type=str
+                ),
                 'preview_goal_index': ParameterValue(
                     L('preview_goal_index'), value_type=int
                 ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -9,7 +10,7 @@ from typing import Dict, Optional, Tuple
 from geometry_msgs.msg import PoseStamped
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Float32, Int32, String
 import yaml
 
 from .grid_utils import quaternion_from_yaw
@@ -20,6 +21,35 @@ from .tf_utils import TfHelper
 DEFAULT_SEMANTIC = project_path(
     'inno_jazzy_ws', 'src', 'inno_autonav', 'config', 'semantic_points.yaml'
 )
+
+
+class ThermalRerouteTrigger:
+    """Confirm sustained heat and latch one reroute per mode-3 session."""
+
+    def __init__(self, threshold_c: float = 40.0, required_hits: int = 3) -> None:
+        if threshold_c <= 0.0 or required_hits < 1:
+            raise ValueError("thermal threshold and hit count must be positive")
+        self.threshold_c = float(threshold_c)
+        self.required_hits = int(required_hits)
+        self.hits = 0
+        self.triggered = False
+
+    def reset(self) -> None:
+        self.hits = 0
+        self.triggered = False
+
+    def update(self, temperature_c: float, enabled: bool) -> bool:
+        if not enabled or self.triggered:
+            self.hits = 0
+            return False
+        if not math.isfinite(temperature_c) or temperature_c < self.threshold_c:
+            self.hits = 0
+            return False
+        self.hits += 1
+        if self.hits < self.required_hits:
+            return False
+        self.triggered = True
+        return True
 
 
 def normalize_label(label: str, aliases: Optional[Dict[str, str]] = None) -> str:
@@ -115,10 +145,36 @@ class MissionCommander(Node):
         self.goal_publisher = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self.state_publisher = self.create_publisher(String, '/mission_state', 10)
         self.create_subscription(String, '/mission_text', self._mission_callback, 10)
-        self._state('READY')
+        self.declare_parameter("thermal_threshold_c", 40.0)
+        self.declare_parameter("thermal_confirmation_hits", 3)
+        threshold = float(self.get_parameter("thermal_threshold_c").value)
+        hits = int(self.get_parameter("thermal_confirmation_hits").value)
+        self.thermal_trigger = ThermalRerouteTrigger(threshold, hits)
+        self.drive_mode = 1
+        self.thermal_status_publisher = self.create_publisher(
+            String, "/thermal_route_status", 10
+        )
+        self.create_subscription(
+            Float32, "/thermal/max_temperature_c", self._thermal_callback, 10
+        )
+        self.create_subscription(Int32, "/drive_mode", self._drive_mode_callback, 10)
+        self._state("READY")
         self.get_logger().info(
             f'mission commander: {len(self.points)} semantic points, {semantic_yaml}'
         )
+
+    def _drive_mode_callback(self, message: Int32) -> None:
+        mode = int(message.data)
+        if mode == self.drive_mode:
+            return
+        self.drive_mode = mode
+        self.thermal_trigger.reset()
+
+    def _thermal_callback(self, message: Float32) -> None:
+        if self.thermal_trigger.update(
+            float(message.data), enabled=self.drive_mode == 3
+        ):
+            self.thermal_status_publisher.publish(String(data="THERMAL_DANGER:EXIT3"))
 
     def _resolve(self, label: str) -> Tuple[str, Dict]:
         normalized = normalize_label(label, self.aliases)

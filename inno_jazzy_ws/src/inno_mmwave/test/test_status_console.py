@@ -16,6 +16,7 @@ from inno_mmwave.status_console import (  # noqa: E402
     MODE_TITLES,
     StatusConsole,
     VICTIM_FUSION_TOPIC,
+    THERMAL_ROUTE_TOPIC,
     waypoint_log_text,
 )
 
@@ -33,6 +34,7 @@ def test_console_uses_filtered_target_topics() -> None:
     assert FILTERED_DISTANCE_TOPIC == '/mmwave/filtered_distance_m'
     assert DYNAMIC_OBSTACLE_TOPIC == '/dynamic_obstacle_detected'
     assert VICTIM_FUSION_TOPIC == '/victim_fusion_status'
+    assert THERMAL_ROUTE_TOPIC == "/thermal_route_status"
 
 
 def test_waypoint_log_formats_queue_progress_and_completion_events() -> None:
@@ -75,6 +77,36 @@ def test_mode_three_reports_newly_confirmed_rescuee_once() -> None:
     assert lines == ['[요구조자] 확정됨 (x=1.2, y=-3.6)']
 
 
+def test_mode_three_reports_stopped_inspection_and_avoidance_resume() -> None:
+    console = object.__new__(StatusConsole)
+    console._mode = 3
+    console._victim_state = None
+    lines = []
+    console._write = lines.append
+
+    console._on_victim_fusion(String(data='INSPECTING:2.15'))
+    console._on_victim_fusion(String(data='OBSTACLE:2.15'))
+
+    assert lines == [
+        '[판별] 동적 후보 2.1m - 정지 후 MMWAVE 확인 중',
+        '[판별] 사람 아님 - 동적장애물 회피 재개',
+    ]
+
+
+def test_rotation_odometry_stale_has_clear_safety_log() -> None:
+    console = object.__new__(StatusConsole)
+    console._mode = 2
+    console._follower_state = None
+    lines = []
+    console._write = lines.append
+
+    message = String(data="ROTATION_ODOMETRY_STALE")
+    console._on_follower_state(message)
+    console._on_follower_state(message)
+
+    assert lines == ["[주행 경고] 회전각 갱신 없음 - 안전 정지"]
+
+
 def test_mode_three_dynamic_obstacle_log_is_transition_only() -> None:
     console = object.__new__(StatusConsole)
     console._mode = 3
@@ -89,6 +121,23 @@ def test_mode_three_dynamic_obstacle_log_is_transition_only() -> None:
     assert lines == [
         '[동적장애물] 감지됨',
         '[동적장애물] 감지 해제',
+    ]
+
+
+def test_mode_three_prints_requested_thermal_reroute_message_once() -> None:
+    console = object.__new__(StatusConsole)
+    console._mode = 3
+    console._thermal_route_state = None
+    lines = []
+    console._write = lines.append
+    message = String(data="THERMAL_DANGER:EXIT3")
+
+    console._on_thermal_route(message)
+    console._on_thermal_route(message)
+
+    assert lines == [
+        "이동경로 중 온도 증가 감지! ->exit2 danger expected",
+        "exit3으로 경로를 변경합니다.",
     ]
 
 

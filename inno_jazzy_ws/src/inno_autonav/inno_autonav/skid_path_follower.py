@@ -1,6 +1,7 @@
 """Conservative rotate-then-drive follower for a skid-steer robot."""
 
 import math
+import time
 from typing import Optional
 
 from geometry_msgs.msg import Twist
@@ -18,6 +19,10 @@ from .tf_utils import TfHelper
 
 def clip(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
+
+
+def requires_in_place_rotation(heading_error: float, threshold: float) -> bool:
+    return abs(normalize_angle(float(heading_error))) >= float(threshold)
 
 
 def nearest_scan_clearances(
@@ -42,6 +47,38 @@ def nearest_scan_clearances(
     return nearest_front, nearest_any
 
 
+class RotationProgressMonitor:
+    """Detect a commanded in-place turn whose localization yaw is frozen."""
+
+    def __init__(self, min_progress_rad: float, timeout_sec: float) -> None:
+        if min_progress_rad <= 0.0 or timeout_sec <= 0.0:
+            raise ValueError("rotation progress limits must be positive")
+        self.min_progress_rad = float(min_progress_rad)
+        self.timeout_sec = float(timeout_sec)
+        self.reset()
+
+    def reset(self) -> None:
+        self.reference_yaw: Optional[float] = None
+        self.reference_time: Optional[float] = None
+
+    def stalled(self, yaw: float, now: float, active: bool = True) -> bool:
+        if not active:
+            self.reset()
+            return False
+        yaw = float(yaw)
+        now = float(now)
+        if self.reference_yaw is None or self.reference_time is None:
+            self.reference_yaw = yaw
+            self.reference_time = now
+            return False
+        progress = abs(normalize_angle(yaw - self.reference_yaw))
+        if progress >= self.min_progress_rad:
+            self.reference_yaw = yaw
+            self.reference_time = now
+            return False
+        return now - self.reference_time >= self.timeout_sec
+
+
 class SkidPathFollower(Node):
     def __init__(self) -> None:
         super().__init__('skid_path_follower')
@@ -62,7 +99,10 @@ class SkidPathFollower(Node):
             'k_angular': 1.2,
             'emergency_stop_distance': 0.28,
             'emergency_front_angle_deg': 35.0,
-            'rotation_clearance_distance': 0.32,
+            "rotation_clearance_distance": 0.32,
+            "minimum_turn_speed_ratio": 0.40,
+            "rotation_progress_min_rad": 0.04,
+            "rotation_progress_timeout_sec": 3.0,
             'control_rate_hz': 10.0,
         }
         for name, value in defaults.items():
@@ -92,19 +132,31 @@ class SkidPathFollower(Node):
             self.get_parameter('emergency_front_angle_deg').value
         ))
         self.rotation_clearance_distance = float(
-            self.get_parameter('rotation_clearance_distance').value
+            self.get_parameter("rotation_clearance_distance").value
+        )
+        self.minimum_turn_speed_ratio = float(
+            self.get_parameter("minimum_turn_speed_ratio").value
+        )
+        rotation_progress_min = float(
+            self.get_parameter("rotation_progress_min_rad").value
+        )
+        rotation_progress_timeout = float(
+            self.get_parameter("rotation_progress_timeout_sec").value
         )
         control_rate = float(self.get_parameter('control_rate_hz').value)
         positive = (
             self.lookahead, self.goal_tolerance, self.yaw_tolerance,
             self.rotate_threshold, self.max_linear, self.max_angular,
             self.k_linear, self.k_angular, self.emergency_distance,
-            self.front_angle, self.rotation_clearance_distance, control_rate,
+            self.front_angle, self.rotation_clearance_distance,
+            rotation_progress_min, rotation_progress_timeout, control_rate,
         )
         if not 0.0 < self.rotate_exit_threshold < self.rotate_threshold:
             raise ValueError(
                 'rotate_exit_threshold는 rotate_in_place_threshold보다 작아야 합니다.'
             )
+        if not 0.0 < self.minimum_turn_speed_ratio <= 1.0:
+            raise ValueError("minimum_turn_speed_ratio must be in (0, 1]")
         if any(value <= 0.0 for value in positive):
             raise ValueError('skid follower의 모든 거리/속도/gain/rate는 양수여야 합니다.')
 
@@ -118,6 +170,11 @@ class SkidPathFollower(Node):
         self.rotation_clearance_blocked = False
         self.rotating_in_place = False
         self.rotation_direction = 0.0
+        self.rotation_stalled = False
+        self.rotation_stall_yaw = 0.0
+        self.rotation_progress = RotationProgressMonitor(
+            rotation_progress_min, rotation_progress_timeout
+        )
         self.publisher = self.create_publisher(Twist, cmd_vel_topic, 10)
         self.state_publisher = self.create_publisher(String, '/follower_state', 10)
         self.create_subscription(Path, '/planned_path', self._path_callback, qos)
@@ -158,6 +215,7 @@ class SkidPathFollower(Node):
 
     def _path_callback(self, message: Path) -> None:
         self.path = message if message.poses else None
+        self.rotation_progress.reset()
         if not message.poses:
             self._publish_stop('EMPTY_PATH')
             return
@@ -200,6 +258,13 @@ class SkidPathFollower(Node):
             self._publish_stop('WAITING_FOR_TF')
             return
         x, y, yaw = current
+        if self.rotation_stalled:
+            recovered = abs(normalize_angle(yaw - self.rotation_stall_yaw))
+            if recovered < self.rotation_progress.min_progress_rad:
+                self._publish_stop("ROTATION_ODOMETRY_STALE")
+                return
+            self.rotation_stalled = False
+            self.rotation_progress.reset()
         goal = self.path.poses[-1].pose
         goal_distance = math.hypot(goal.position.x - x, goal.position.y - y)
         if goal_distance <= self.goal_tolerance:
@@ -235,9 +300,25 @@ class SkidPathFollower(Node):
             if abs(heading_error) <= self.rotate_exit_threshold:
                 self.rotating_in_place = False
                 self.rotation_direction = 0.0
-        elif abs(heading_error) >= self.rotate_threshold:
+                self.rotation_progress.reset()
+        elif requires_in_place_rotation(heading_error, self.rotate_threshold):
             self.rotating_in_place = True
             self.rotation_direction = 1.0 if heading_error >= 0.0 else -1.0
+            self.rotation_progress.reset()
+
+        if self.rotating_in_place and self.rotation_progress.stalled(
+            yaw, time.monotonic(), active=True
+        ):
+            self.rotating_in_place = False
+            self.rotation_stalled = True
+            self.rotation_stall_yaw = yaw
+            self._publish_stop("ROTATION_ODOMETRY_STALE")
+            self.get_logger().error(
+                "In-place rotation stopped: map->base_link yaw did not update"
+            )
+            return
+        if not self.rotating_in_place:
+            self.rotation_progress.reset()
 
         if self.rotating_in_place and self.rotation_clearance_blocked:
             self._publish_stop('ROTATION_BLOCKED')
@@ -263,7 +344,8 @@ class SkidPathFollower(Node):
             )
             # Slow down while steering to reduce skid and LiDAR motion distortion.
             command.linear.x *= max(
-                0.25, 1.0 - abs(heading_error) / self.rotate_threshold
+                self.minimum_turn_speed_ratio,
+                1.0 - abs(heading_error) / self.rotate_threshold,
             )
             state = 'FOLLOWING_PATH'
         self.publisher.publish(command)

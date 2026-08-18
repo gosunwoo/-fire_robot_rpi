@@ -8,11 +8,16 @@ from sensor_msgs.msg import LaserScan
 import yaml
 
 from inno_autonav.astar_replanner import (
+    AstarReplanner,
     astar_search,
     footprint_clearance_radius,
+    remaining_path_from_nearest,
     simplify_path,
 )
-from inno_autonav.skid_path_follower import nearest_scan_clearances
+from inno_autonav.skid_path_follower import (
+    RotationProgressMonitor, nearest_scan_clearances,
+    requires_in_place_rotation,
+)
 from inno_autonav.grid_utils import (
     MapGrid,
     grid_to_world,
@@ -71,6 +76,24 @@ def test_skid_footprint_clearance_uses_half_diagonal_plus_margin():
     assert radius == pytest.approx(0.3192, abs=0.0002)
 
 
+def test_sharp_waypoint_corner_uses_skid_arc_not_in_place_rotation():
+    assert not requires_in_place_rotation(math.radians(121.0), 2.70)
+    assert requires_in_place_rotation(math.radians(170.0), 2.70)
+
+
+def test_rotation_monitor_stops_frozen_yaw_but_accepts_progress():
+    monitor = RotationProgressMonitor(0.04, 3.0)
+    assert not monitor.stalled(0.0, 0.0)
+    assert not monitor.stalled(0.01, 2.9)
+    assert monitor.stalled(0.01, 3.0)
+
+    monitor.reset()
+    assert not monitor.stalled(0.0, 0.0)
+    assert not monitor.stalled(0.05, 2.0)
+    assert not monitor.stalled(0.05, 4.9)
+    assert monitor.stalled(0.05, 5.0)
+
+
 def test_single_scan_point_still_triggers_immediate_safety_ranges():
     scan = LaserScan()
     scan.angle_min = 0.0
@@ -95,3 +118,45 @@ def test_side_scan_point_blocks_rotation_but_not_front_emergency():
     front, all_around = nearest_scan_clearances(scan, 0.61)
     assert math.isinf(front)
     assert all_around == pytest.approx(0.25)
+
+
+def test_blocked_dynamic_path_replans_without_publishing_empty_path():
+    planner = object.__new__(AstarReplanner)
+    planner._waiting_dynamic_replan = False
+    planner.goal = object()
+    planner.combined_grid = MapGrid(
+        1, 1, 0.05, 0.0, 0.0, 0.0, "map",
+        np.asarray([[100]], dtype=np.int8),
+    )
+    planner.current_path_cells = [(0, 0)]
+    planner.unknown_is_occupied = True
+    planner.dynamic_replan_stop = 0.0
+    planner.tf = None
+    events = []
+    planner._state = lambda state: events.append(("state", state))
+    planner._plan = lambda reason: events.append(("plan", reason))
+    planner._publish_empty_path = lambda: events.append(("empty", None))
+
+    planner._stop_if_current_path_blocked()
+
+    assert events == [
+        ("state", "REPLANNING"), ("plan", "DYNAMIC_BLOCKED")
+    ]
+
+
+def test_remaining_path_ignores_cells_already_passed():
+    path = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]
+    assert remaining_path_from_nearest(path, (3, 1)) == [(3, 0), (4, 0)]
+
+
+def test_periodic_timer_does_not_replace_clean_path():
+    planner = object.__new__(AstarReplanner)
+    planner.goal = object()
+    planner._dirty = False
+    planner._waiting_dynamic_replan = False
+    events = []
+    planner._plan = events.append
+
+    planner._timer_callback()
+
+    assert events == []

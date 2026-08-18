@@ -5,7 +5,7 @@ import time
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from std_msgs.msg import Int32, String
+from std_msgs.msg import Bool, Int32, String
 
 
 MODE_LABELS = {
@@ -23,6 +23,10 @@ def command_source_for_mode(mode: int) -> int:
     return 1 if mode == 1 else 2
 
 
+def inspection_stops_output(mode: int, inspection_hold: bool) -> bool:
+    return int(mode) == 3 and bool(inspection_hold)
+
+
 class CmdVelModeMux(Node):
     def __init__(self):
         super().__init__('cmd_vel_mode_mux')
@@ -33,6 +37,7 @@ class CmdVelModeMux(Node):
         if self.timeout <= 0.0 or rate <= 0.0:
             raise ValueError('timeout and publish rate must be positive')
         self.mode = 1
+        self.inspection_hold = False
         self.commands = {1: Twist(), 2: Twist()}
         self.received = {1: 0.0, 2: 0.0}
         self.output = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -40,6 +45,9 @@ class CmdVelModeMux(Node):
         self.create_subscription(Twist, '/cmd_vel_keyboard', lambda m: self._cmd(1, m), 10)
         self.create_subscription(Twist, '/cmd_vel_auto', lambda m: self._cmd(2, m), 10)
         self.create_subscription(Int32, '/drive_mode', self._mode, 10)
+        self.create_subscription(
+            Bool, '/mode3_inspection_hold', self._inspection_hold, 10
+        )
         self.create_timer(1.0 / rate, self._publish)
         self.get_logger().info('Drive mode 1 (keyboard) selected')
 
@@ -58,11 +66,19 @@ class CmdVelModeMux(Node):
         self.get_logger().info(f'Drive mode {self.mode} ({label}) selected')
 
     def _publish(self):
+        if inspection_stops_output(
+            self.mode, self.inspection_hold
+        ):
+            self.output.publish(Twist())
+            return
         source = command_source_for_mode(self.mode)
         command = self.commands[source]
         if time.monotonic() - self.received[source] > self.timeout:
             command = Twist()
         self.output.publish(command)
+
+    def _inspection_hold(self, message):
+        self.inspection_hold = bool(message.data)
 
     def destroy_node(self):
         if rclpy.ok():

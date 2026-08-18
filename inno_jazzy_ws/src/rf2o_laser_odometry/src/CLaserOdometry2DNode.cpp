@@ -72,6 +72,7 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
   // Init variables
   rf2o_ref.module_initialized = false;
   rf2o_ref.first_laser_scan   = true;
+  last_scan_received_time = get_clock()->now();
 }
 
 
@@ -81,6 +82,7 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
 */
 void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::SharedPtr new_scan)
 {
+  last_scan_received_time = get_clock()->now();
   if (GT_pose_initialized)
   {
     // Keep in memory the last received laser_scan
@@ -173,10 +175,14 @@ void CLaserOdometry2DNode::process()
     // Do not run on the same data!
     new_scan_available = false;
   }
-  else
+  else if ((get_clock()->now() - last_scan_received_time).seconds() > 1.0)
   {
-    // This is a warning. We depend on laser scans, so no meaning running faster than scan freq.
-    RCLCPP_WARN(get_logger(), "Waiting for laser_scans....");
+    // A faster processing loop than the LiDAR is normal. Warn only when the
+    // sensor stream itself has actually gone stale.
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "LiDAR scan stream stale for more than 1.0 s"
+    );
   }
 }
 

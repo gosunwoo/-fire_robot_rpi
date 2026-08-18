@@ -20,9 +20,10 @@ dynamic_obstacle_layer:
     cluster_track_radius_m: 0.35
     cluster_max_scan_gap_sec: 0.35
     persistent_obstacles: false
-    obstacle_timeout_sec: 1.2
-    # A* applies the skid footprint radius once after grid composition.
-    inflation_radius: 0.0
+    obstacle_timeout_sec: 2.5
+    # Add 0.15m around dynamic objects; A* then adds the 0.319m skid
+    # footprint clearance after composing static and dynamic grids.
+    inflation_radius: 0.15
     marker_diameter_m: 0.60
     # Ignore scan endpoints on/near saved SLAM walls and unknown boundaries.
     wall_exclusion_radius: 0.25
@@ -40,6 +41,9 @@ victim_fusion:
     cluster_radius_m: 0.22
     min_cluster_points: 2
     max_cluster_points: 15
+    # Discovery remains 2..15 points; after classification a larger body
+    # cluster may follow the same latched rescuee.
+    max_follow_cluster_points: 80
     victim_follow_radius_m: 0.65
     victim_follow_ambiguity_margin_m: 0.15
     victim_history_spacing_m: 0.10
@@ -54,6 +58,15 @@ victim_fusion:
     victim_merge_radius_m: 0.55
     red_suppression_radius_m: 0.50
     victim_marker_diameter_m: 0.75
+    # MODE 3: stop at a confirmed front obstacle before deciding person vs object.
+    inspection_min_range_m: 1.5
+    inspection_max_range_m: 4.0
+    inspection_settle_sec: 1.0
+    inspection_timeout_sec: 4.0
+    inspection_confirmation_hits: 3
+    inspection_confirmation_sec: 0.5
+    inspection_reject_hold_sec: 60.0
+    inspection_reject_radius_m: 0.60
     publish_rate_hz: 2.0
 
 astar_replanner:
@@ -67,7 +80,7 @@ astar_replanner:
     robot_length_m: 0.39
     robot_width_m: 0.20
     safety_margin_m: 0.10
-    dynamic_replan_stop_sec: 0.35
+    dynamic_replan_stop_sec: 0.0
     start_clearance_radius: 0.18
     allow_diagonal: true
 
@@ -77,19 +90,24 @@ skid_path_follower:
     base_frame: base_link
     scan_topic: /scan
     cmd_vel_topic: /cmd_vel_auto
-    lookahead_distance: 0.35
+    lookahead_distance: 0.55
     goal_tolerance: 0.12
     yaw_tolerance: 0.25
     align_goal_yaw: false
-    rotate_in_place_threshold: 0.45
-    rotate_exit_threshold: 0.20
+    # Skid steering follows even sharp corners as a slow arc. Pure in-place
+    # rotation is reserved for near-opposite (>155 degree) targets.
+    rotate_in_place_threshold: 2.70
+    rotate_exit_threshold: 0.35
     max_linear_speed: 0.06
     max_angular_speed: 0.45
     k_linear: 0.5
-    k_angular: 1.2
-    emergency_stop_distance: 0.28
+    k_angular: 0.9
+    emergency_stop_distance: 0.38
     emergency_front_angle_deg: 35.0
-    rotation_clearance_distance: 0.32
+    rotation_clearance_distance: 0.42
+    minimum_turn_speed_ratio: 0.40
+    rotation_progress_min_rad: 0.04
+    rotation_progress_timeout_sec: 3.0
     control_rate_hz: 10.0
 
 mission_commander:
@@ -97,3 +115,5 @@ mission_commander:
     map_frame: map
     base_frame: base_link
     use_source_if_no_tf: false
+    thermal_threshold_c: 40.0
+    thermal_confirmation_hits: 3

@@ -1,6 +1,8 @@
 import pytest
 
-from inno_autonav.mission_commander import normalize_label, parse_mission
+from inno_autonav.mission_commander import (
+    ThermalRerouteTrigger, normalize_label, parse_mission,
+)
 from geometry_msgs.msg import PoseStamped
 import yaml
 
@@ -23,6 +25,18 @@ from inno_autonav.waypoint_queue import (
 )
 def test_parse_mission(text, expected):
     assert parse_mission(text) == expected
+
+
+def test_thermal_reroute_requires_three_hot_frames_and_latches():
+    trigger = ThermalRerouteTrigger(threshold_c=40.0, required_hits=3)
+    assert not trigger.update(40.0, enabled=True)
+    assert not trigger.update(39.9, enabled=True)
+    assert not trigger.update(44.0, enabled=True)
+    assert not trigger.update(44.0, enabled=True)
+    assert trigger.update(44.0, enabled=True)
+    assert not trigger.update(50.0, enabled=True)
+    trigger.reset()
+    assert not trigger.update(50.0, enabled=False)
 
 
 def test_alias_normalization():

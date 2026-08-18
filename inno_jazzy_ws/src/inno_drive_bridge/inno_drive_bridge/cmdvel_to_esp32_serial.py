@@ -23,7 +23,8 @@ class CmdVelToEsp32Serial(Node):
             'max_steps_per_sec': 1600,
             'left_sign': 1,
             'right_sign': 1,
-            'cmd_timeout_sec': 0.5,
+            "cmd_timeout_sec": 0.5,
+            "repeat_error_interval_sec": 5.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -38,7 +39,10 @@ class CmdVelToEsp32Serial(Node):
         self.max_sps = int(self.get_parameter('max_steps_per_sec').value)
         self.left_sign = int(self.get_parameter('left_sign').value)
         self.right_sign = int(self.get_parameter('right_sign').value)
-        self.cmd_timeout = float(self.get_parameter('cmd_timeout_sec').value)
+        self.cmd_timeout = float(self.get_parameter("cmd_timeout_sec").value)
+        self.repeat_error_interval = float(
+            self.get_parameter("repeat_error_interval_sec").value
+        )
         self._validate_parameters()
 
         self.status_publisher = self.create_publisher(String, '/esp32/status', 10)
@@ -52,6 +56,8 @@ class CmdVelToEsp32Serial(Node):
         self._seq = 0
         self._last_cmd_time = time.monotonic()
         self._timed_out = False
+        self._last_error_line = None
+        self._last_error_time = float("-inf")
 
         try:
             self.serial = serial.Serial(
@@ -80,8 +86,11 @@ class CmdVelToEsp32Serial(Node):
             raise ValueError('wheel_radius and wheel_separation must be greater than zero')
         if self.full_steps <= 0 or self.microsteps <= 0 or self.gear_ratio <= 0.0:
             raise ValueError('motor step parameters and gear_ratio must be greater than zero')
-        if self.max_sps <= 0 or self.cmd_timeout <= 0.0:
-            raise ValueError('max_steps_per_sec and cmd_timeout_sec must be greater than zero')
+        if (
+            self.max_sps <= 0 or self.cmd_timeout <= 0.0
+            or self.repeat_error_interval <= 0.0
+        ):
+            raise ValueError('max_steps_per_sec, cmd_timeout_sec, and repeat_error_interval_sec must be greater than zero')
         if self.left_sign not in (-1, 1) or self.right_sign not in (-1, 1):
             raise ValueError('left_sign and right_sign must be either -1 or 1')
 
@@ -169,10 +178,21 @@ class CmdVelToEsp32Serial(Node):
             self._publish_status(line)
             return
 
-        if message_type in ('ACK', 'STAT', 'ERR'):
+        if message_type == "ERR":
+            now = time.monotonic()
+            if (
+                line == self._last_error_line
+                and now - self._last_error_time < self.repeat_error_interval
+            ):
+                return
+            self._last_error_line = line
+            self._last_error_time = now
             self._publish_status(line)
-            if message_type == 'ERR':
-                self.get_logger().error(f'ESP32: {line}')
+            self.get_logger().error(f"ESP32: {line}")
+            return
+
+        if message_type in ("ACK", "STAT"):
+            self._publish_status(line)
             return
 
         # Some firmware versions emit a fragmented/garbled line when the serial link is busy.

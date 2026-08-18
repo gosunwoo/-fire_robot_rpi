@@ -198,3 +198,33 @@ def test_all_signal_filter_defaults_are_exposed_as_prefixed_parameters():
     assert config.min_distance_m == 1.2
     assert config.max_distance_m == 12.0
     assert config.motion_start_mps == 0.10
+
+
+def test_stale_stream_closes_uart_and_schedules_restart():
+    events = []
+    fake_node = type('FakeNode', (), {})()
+    fake_node._initialization_complete = True
+    fake_node._last_frame_monotonic = 10.0
+    fake_node._data_wait_started = None
+    fake_node.stale_timeout_sec = 1.5
+    fake_node.reconnect_interval_sec = 2.0
+    fake_node._sensor_state = 'ONLINE'
+    fake_node._reset_filter_and_publish = (
+        lambda now, reason: events.append(('reset', now, reason))
+    )
+    fake_node._set_sensor_state = (
+        lambda state: events.append(('state', state))
+    )
+    fake_node._close_serial = lambda: events.append(('close',))
+
+    C4001Node._update_health(fake_node, 12.0)
+
+    assert events == [
+        ('reset', 12.0, 'sensor_stale'),
+        ('state', 'OFFLINE'),
+        ('close',),
+    ]
+    assert not fake_node._initialization_complete
+    assert fake_node._last_frame_monotonic is None
+    assert fake_node._data_wait_started is None
+    assert fake_node._next_connect_monotonic == 14.0

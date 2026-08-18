@@ -4,6 +4,7 @@ import pytest
 from visualization_msgs.msg import Marker, MarkerArray
 
 from inno_autonav.victim_fusion import (
+    InspectionWindow,
     LidarCluster,
     RescueeTracker,
     cluster_points,
@@ -11,6 +12,7 @@ from inno_autonav.victim_fusion import (
     filtered_dynamic_markers,
     recolored_dynamic_markers,
     follow_victim_positions,
+    select_forward_inspection_cluster,
     select_unique_range_match,
     valid_mmwave_match_distance,
 )
@@ -32,6 +34,50 @@ def selection(points, distance):
         maximum_tolerance_m=1.5,
         ambiguity_margin_m=0.35,
     )
+
+
+def inspection_selection(points):
+    return select_forward_inspection_cluster(
+        points,
+        robot_x=0.0,
+        robot_y=0.0,
+        sensor_yaw_rad=0.0,
+        horizontal_fov_rad=math.radians(100.0),
+        min_range_m=1.5,
+        max_range_m=4.0,
+        cluster_radius_m=0.22,
+    )
+
+
+def test_inspection_selects_one_front_obstacle_at_or_beyond_1_5m():
+    selected = inspection_selection([(1.5, 0.0), (1.55, 0.02)])
+    assert selected is not None
+    assert selected.range_m == pytest.approx(1.525, abs=0.02)
+    assert inspection_selection([(1.3, 0.0), (1.35, 0.02)]) is None
+    assert inspection_selection([(-2.0, 0.0), (-2.05, 0.02)]) is None
+
+
+def test_inspection_rejects_ambiguous_front_obstacles():
+    assert inspection_selection([
+        (2.0, 0.0), (2.04, 0.01),
+        (2.2, 0.5), (2.24, 0.51),
+    ]) is None
+
+
+def test_inspection_waits_for_settle_and_three_mmwave_matches():
+    window = InspectionWindow(1.0, 4.0, 3, 0.5)
+    window.begin(LidarCluster(2.0, 0.0, 20, 2.0, 0.0), 0.0)
+    assert window.evaluate(0.5, True) == "SETTLING"
+    assert window.evaluate(1.0, True) == "INSPECTING"
+    assert window.evaluate(1.25, True) == "INSPECTING"
+    assert window.evaluate(1.5, True) == "PERSON"
+
+
+def test_inspection_times_out_as_non_person_obstacle():
+    window = InspectionWindow(1.0, 4.0, 3, 0.5)
+    window.begin(LidarCluster(2.0, 0.0, 20, 2.0, 0.0), 0.0)
+    assert window.evaluate(3.9, False) == "INSPECTING"
+    assert window.evaluate(4.0, False) == "OBSTACLE"
 
 
 def test_two_to_fifteen_nearby_lidar_points_form_one_person_cluster():
