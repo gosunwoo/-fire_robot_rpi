@@ -122,6 +122,19 @@ declare -a topics=(
 
   # Classification messages include this revision in Mode 3/4.
   /hazard/revision
+
+  # Mode 6 smoke-assist sensor evidence, trigger state, and RViz color feeds.
+  /imu/data
+  /imu/magnetic_field
+  /imu/status
+  /ultrasonic/front/range
+  /mode6/smoke_assist_active
+  /mode6/ultrasonic_obstacle
+  /mode6/safety_hold
+  /mode6/status
+  /mode6/log
+  /scan_rviz_red
+  /scan_rviz_blue
 )
 
 die() {

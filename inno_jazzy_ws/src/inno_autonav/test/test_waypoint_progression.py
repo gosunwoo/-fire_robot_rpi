@@ -76,6 +76,22 @@ def test_mode5_survivor_follow_hold_is_independent_from_replanning_hold():
     assert follower.hold is False
 
 
+def test_mode6_relative_imu_heading_is_anchored_to_map_heading():
+    follower = object.__new__(SkidPathFollower)
+    follower.drive_mode = 6
+    follower.mode6_active = True
+    follower.mode6_use_imu_heading = True
+    follower.mode6_imu_timeout = 1.0
+    follower.mode6_imu_received_at = 10.0
+    follower.mode6_imu_yaw = 0.20
+    follower.mode6_imu_anchor = None
+    follower.mode6_map_yaw_anchor = None
+
+    assert follower._mode6_heading(1.0, 10.0) == pytest.approx(1.0)
+    follower.mode6_imu_yaw = 0.50
+    assert follower._mode6_heading(0.8, 10.1) == pytest.approx(1.3)
+
+
 def test_immediately_reached_waypoint_advances_after_path_acceptance():
     queue = object.__new__(WaypointQueue)
     queue.queue = [PoseStamped(), PoseStamped()]

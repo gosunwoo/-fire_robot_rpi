@@ -32,5 +32,6 @@ setup(
         "slam_keyboard_runner = inno_robot_bringup.slam_keyboard_runner:main",
         "bag_topic_preflight = inno_robot_bringup.bag_topic_preflight:main",
         "mode3_audio_guide = inno_robot_bringup.mode3_audio_guide:main",
+        "bno055_imu = inno_robot_bringup.bno055_imu_node:main",
     ]},
 )

@@ -1,6 +1,7 @@
 """Conservative rotate-then-drive follower for a skid-steer robot."""
 
 import math
+import time
 from typing import Optional, Sequence, Tuple
 
 from geometry_msgs.msg import Twist
@@ -9,7 +10,7 @@ import rclpy
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Bool, Empty, Int32, String
 
 from .grid_utils import normalize_angle, yaw_from_quaternion
@@ -151,6 +152,13 @@ class SkidPathFollower(Node):
             'localization_ready_topic': '/localization_ready',
             'replan_hold_topic': '/replanning/hold',
             'survivor_follow_hold_topic': '/survivor_follow_hold',
+            'mode6_active_topic': '/mode6/smoke_assist_active',
+            'mode6_safety_hold_topic': '/mode6/safety_hold',
+            'mode6_obstacle_topic': '/mode6/ultrasonic_obstacle',
+            'mode6_imu_topic': '/imu/data',
+            'mode6_imu_timeout_sec': 1.0,
+            'mode6_initial_stop_sec': 0.50,
+            'mode6_use_imu_heading': True,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -161,6 +169,25 @@ class SkidPathFollower(Node):
         replan_hold_topic = str(self.get_parameter('replan_hold_topic').value)
         survivor_follow_hold_topic = str(
             self.get_parameter('survivor_follow_hold_topic').value
+        )
+        mode6_active_topic = str(
+            self.get_parameter('mode6_active_topic').value
+        )
+        mode6_safety_hold_topic = str(
+            self.get_parameter('mode6_safety_hold_topic').value
+        )
+        mode6_obstacle_topic = str(
+            self.get_parameter('mode6_obstacle_topic').value
+        )
+        mode6_imu_topic = str(self.get_parameter('mode6_imu_topic').value)
+        self.mode6_imu_timeout = float(
+            self.get_parameter('mode6_imu_timeout_sec').value
+        )
+        self.mode6_initial_stop = float(
+            self.get_parameter('mode6_initial_stop_sec').value
+        )
+        self.mode6_use_imu_heading = bool(
+            self.get_parameter('mode6_use_imu_heading').value
         )
         self.lookahead = float(self.get_parameter('lookahead_distance').value)
         self.goal_tolerance = float(self.get_parameter('goal_tolerance').value)
@@ -204,6 +231,7 @@ class SkidPathFollower(Node):
             self.k_linear, self.k_angular, self.emergency_distance,
             self.front_angle, control_rate, self.spin_guard_max_rotation,
             self.spin_guard_progress,
+            self.mode6_imu_timeout, self.mode6_initial_stop,
         )
         if not 0.0 < self.rotate_exit_threshold < self.rotate_threshold:
             raise ValueError(
@@ -227,6 +255,15 @@ class SkidPathFollower(Node):
         # Mode 5 escort uses an independent hold.  With no Mode 5 publisher it
         # remains false, preserving every standalone mode's follower behavior.
         self.survivor_follow_hold = False
+        self.drive_mode = 1
+        self.mode6_active = False
+        self.mode6_safety_hold = False
+        self.mode6_obstacle = False
+        self.mode6_obstacle_stop_until = float('-inf')
+        self.mode6_imu_yaw = None
+        self.mode6_imu_received_at = float('-inf')
+        self.mode6_imu_anchor = None
+        self.mode6_map_yaw_anchor = None
         self.rotating_in_place = False
         self.rotation_direction = 0.0
         self.path_progress = 0.0
@@ -257,6 +294,18 @@ class SkidPathFollower(Node):
             survivor_follow_hold_topic,
             self._survivor_follow_hold_callback,
             10,
+        )
+        self.create_subscription(
+            Bool, mode6_active_topic, self._mode6_active_callback, 10
+        )
+        self.create_subscription(
+            Bool, mode6_safety_hold_topic, self._mode6_safety_hold_callback, 10
+        )
+        self.create_subscription(
+            Bool, mode6_obstacle_topic, self._mode6_obstacle_callback, 10
+        )
+        self.create_subscription(
+            Imu, mode6_imu_topic, self._mode6_imu_callback, 10
         )
         self.create_timer(1.0 / control_rate, self._control)
         self.add_on_set_parameters_callback(self._set_speed_parameters)
@@ -329,8 +378,60 @@ class SkidPathFollower(Node):
     def _mode_callback(self, message: Int32) -> None:
         # MODE 3/4 must finish facing the inspected obstacle so the forward
         # mmWave sensor or camera observes it at the standoff point.
+        self.drive_mode = int(message.data)
         self.align_goal_yaw = (
-            self.default_align_goal_yaw or int(message.data) in (3, 4)
+            self.default_align_goal_yaw or self.drive_mode in (3, 4)
+        )
+        if self.drive_mode != 6:
+            self.mode6_imu_anchor = None
+            self.mode6_map_yaw_anchor = None
+
+    def _mode6_active_callback(self, message: Bool) -> None:
+        active = bool(message.data)
+        if active != self.mode6_active:
+            self.mode6_imu_anchor = None
+            self.mode6_map_yaw_anchor = None
+        self.mode6_active = active
+        if not active:
+            self.mode6_obstacle = False
+
+    def _mode6_safety_hold_callback(self, message: Bool) -> None:
+        self.mode6_safety_hold = bool(message.data)
+
+    def _mode6_obstacle_callback(self, message: Bool) -> None:
+        blocked = bool(message.data)
+        if blocked and not self.mode6_obstacle:
+            self.mode6_obstacle_stop_until = (
+                time.monotonic() + self.mode6_initial_stop
+            )
+        self.mode6_obstacle = blocked
+
+    def _mode6_imu_callback(self, message: Imu) -> None:
+        try:
+            yaw = yaw_from_quaternion(message.orientation)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(yaw):
+            return
+        self.mode6_imu_yaw = yaw
+        self.mode6_imu_received_at = time.monotonic()
+
+    def _mode6_heading(self, tf_yaw: float, now: float) -> float:
+        """Use relative IMU yaw anchored to the latest trusted map heading."""
+        if (
+            self.drive_mode != 6
+            or not self.mode6_active
+            or not self.mode6_use_imu_heading
+            or self.mode6_imu_yaw is None
+            or now - self.mode6_imu_received_at > self.mode6_imu_timeout
+        ):
+            return tf_yaw
+        if self.mode6_imu_anchor is None or self.mode6_map_yaw_anchor is None:
+            self.mode6_imu_anchor = self.mode6_imu_yaw
+            self.mode6_map_yaw_anchor = tf_yaw
+        return normalize_angle(
+            self.mode6_map_yaw_anchor
+            + normalize_angle(self.mode6_imu_yaw - self.mode6_imu_anchor)
         )
 
     def _cancel_callback(self, _message: Empty) -> None:
@@ -404,6 +505,18 @@ class SkidPathFollower(Node):
         if self.survivor_follow_hold:
             self._publish_stop('SURVIVOR_FOLLOW_HOLD')
             return
+        now_monotonic = time.monotonic()
+        if self.drive_mode == 6 and self.mode6_active:
+            if self.mode6_safety_hold:
+                self._publish_stop('MODE6_SENSOR_SAFETY_HOLD')
+                return
+            if (
+                self.mode6_use_imu_heading
+                and now_monotonic - self.mode6_imu_received_at
+                > self.mode6_imu_timeout
+            ):
+                self._publish_stop('MODE6_IMU_STALE_STOP')
+                return
         if self.planner_state == 'NO_PATH':
             self._publish_stop('NO_PATH')
             return
@@ -414,7 +527,8 @@ class SkidPathFollower(Node):
         if current is None:
             self._publish_stop('WAITING_FOR_TF')
             return
-        x, y, yaw = current
+        x, y, tf_yaw = current
+        yaw = self._mode6_heading(tf_yaw, now_monotonic)
         goal = self.path.poses[-1].pose
         goal_distance = math.hypot(goal.position.x - x, goal.position.y - y)
         if self._spin_guard_triggered(yaw, goal_distance):
@@ -495,6 +609,19 @@ class SkidPathFollower(Node):
             )
             self.last_command_was_rotation = False
             state = 'FOLLOWING_PATH'
+        if self.drive_mode == 6 and self.mode6_active and self.mode6_obstacle:
+            if now_monotonic < self.mode6_obstacle_stop_until:
+                self._publish_stop('MODE6_ULTRASONIC_INITIAL_STOP')
+                return
+            # A single front sensor cannot certify either side as free. Keep
+            # translation stopped and allow only the turn commanded by the
+            # newly planned map path. Once the object leaves the 0.9 m release
+            # gate, normal path following resumes.
+            command.linear.x = 0.0
+            if abs(command.angular.z) <= 1e-3:
+                self._publish_stop('MODE6_WAITING_FOR_AVOIDANCE_PATH')
+                return
+            state = 'MODE6_ULTRASONIC_AVOIDANCE_TURN'
         self.publisher.publish(command)
         self._state(state)
 

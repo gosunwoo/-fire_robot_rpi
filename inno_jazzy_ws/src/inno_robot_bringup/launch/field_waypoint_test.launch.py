@@ -32,6 +32,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_lidar', default_value='true'),
         DeclareLaunchArgument('use_mmwave', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument(
+            'rviz_config', default_value=bringup + '/rviz/inno_slam.rviz'
+        ),
         DeclareLaunchArgument('assist_check_sec', default_value='10.0'),
         DeclareLaunchArgument('set_initial_pose', default_value='false'),
         DeclareLaunchArgument('auto_localization', default_value='true'),
@@ -113,6 +116,22 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_height', default_value='720'),
         DeclareLaunchArgument('use_thermal_sensor', default_value='false'),
         DeclareLaunchArgument('mode5_enabled', default_value='false'),
+        DeclareLaunchArgument('mode6_enabled', default_value='false'),
+        DeclareLaunchArgument('use_bno055_imu', default_value='false'),
+        DeclareLaunchArgument('bno055_i2c_bus', default_value='1'),
+        DeclareLaunchArgument('bno055_i2c_address', default_value='40'),
+        DeclareLaunchArgument('imu_x', default_value='0.0'),
+        DeclareLaunchArgument('imu_y', default_value='0.0'),
+        DeclareLaunchArgument('imu_z', default_value='0.30'),
+        DeclareLaunchArgument('imu_roll', default_value='0.0'),
+        DeclareLaunchArgument('imu_pitch', default_value='0.0'),
+        DeclareLaunchArgument('imu_yaw', default_value='0.0'),
+        DeclareLaunchArgument('ultrasonic_x', default_value='0.20'),
+        DeclareLaunchArgument('ultrasonic_y', default_value='0.0'),
+        DeclareLaunchArgument('ultrasonic_z', default_value='0.20'),
+        DeclareLaunchArgument('ultrasonic_roll', default_value='0.0'),
+        DeclareLaunchArgument('ultrasonic_pitch', default_value='0.0'),
+        DeclareLaunchArgument('ultrasonic_yaw', default_value='0.0'),
         DeclareLaunchArgument(
             'yolo_model_path',
             default_value=project_path(
@@ -230,6 +249,52 @@ def generate_launch_description():
         }],
         condition=IfCondition(L('use_mode3_audio')),
     )
+    bno055_imu = Node(
+        package='inno_robot_bringup',
+        executable='bno055_imu',
+        name='bno055_imu',
+        output='screen',
+        emulate_tty=True,
+        parameters=[{
+            'i2c_bus': ParameterValue(L('bno055_i2c_bus'), value_type=int),
+            'i2c_address': ParameterValue(
+                L('bno055_i2c_address'), value_type=int
+            ),
+        }],
+        condition=IfCondition(L('use_bno055_imu')),
+    )
+    imu_transform = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_imu_tf',
+        arguments=[
+            '--x', L('imu_x'), '--y', L('imu_y'), '--z', L('imu_z'),
+            '--roll', L('imu_roll'), '--pitch', L('imu_pitch'),
+            '--yaw', L('imu_yaw'), '--frame-id', 'base_link',
+            '--child-frame-id', 'imu_link',
+        ],
+        condition=IfCondition(L('use_bno055_imu')),
+    )
+    ultrasonic_transform = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_ultrasonic_front_tf',
+        arguments=[
+            '--x', L('ultrasonic_x'), '--y', L('ultrasonic_y'),
+            '--z', L('ultrasonic_z'), '--roll', L('ultrasonic_roll'),
+            '--pitch', L('ultrasonic_pitch'), '--yaw', L('ultrasonic_yaw'),
+            '--frame-id', 'base_link', '--child-frame-id', 'ultrasonic_front',
+        ],
+        condition=IfCondition(L('mode6_enabled')),
+    )
+    mode6_assist = Node(
+        package='inno_autonav',
+        executable='mode6_smoke_assist',
+        name='mode6_smoke_assist',
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(L('mode6_enabled')),
+    )
     # autonav_demo also declares ``use_serial``.  Keep the include scoped so
     # its deliberately disabled internal bridge cannot overwrite this launch
     # file's top-level ``use_serial`` value and suppress the ESP32 bridge.
@@ -298,6 +363,9 @@ def generate_launch_description():
                 'angular_speed': ParameterValue(
                     L('turn_speed'), value_type=float
                 ),
+                'mode6_enabled': ParameterValue(
+                    L('mode6_enabled'), value_type=bool
+                ),
             },
         ],
     )
@@ -319,7 +387,7 @@ def generate_launch_description():
     )
     rviz = Node(
         package='rviz2', executable='rviz2', name='rviz2', output='log',
-        arguments=['-d', bringup + '/rviz/inno_slam.rviz'],
+        arguments=['-d', L('rviz_config')],
         condition=IfCondition(L('use_rviz')),
     )
     thermal_viewer = ExecuteProcess(
@@ -333,7 +401,8 @@ def generate_launch_description():
         args + [
             localization, auto_localization, mmwave_bringup, status_console,
             camera_bringup,
-            person_detector, mode3_audio, navigation, keyboard, mux, serial,
+            person_detector, mode3_audio, bno055_imu, imu_transform,
+            ultrasonic_transform, mode6_assist, navigation, keyboard, mux, serial,
             waypoint_queue, rviz, thermal_viewer,
         ]
     )

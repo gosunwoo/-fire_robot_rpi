@@ -12,10 +12,20 @@
 | Right STEP/PUL | 14 |
 | Right DIR | 12 |
 | Right ENA | 13 |
+| HC-SR04 TRIG | 32 |
+| HC-SR04 ECHO | 33 (1kΩ/2kΩ 분압 필수) |
 
-GPIO12는 ESP32 strapping pin이다. TB6600 연결 상태 때문에 업로드 또는 부팅이 불안정하면 Right DIR 배선을 GPIO32 또는 GPIO33으로 옮기고 펌웨어의 `R_DIR`도 변경한다.
+GPIO12는 ESP32 strapping pin이다. TB6600 연결 상태 때문에 업로드 또는 부팅이
+불안정하면 Right DIR 배선을 GPIO16 등 검증한 출력 핀으로 옮기고 펌웨어의 `R_DIR`도
+같이 변경한다. GPIO32와 GPIO33은 모드 6 초음파 센서가 사용하므로 모터에 사용하지
+않는다.
 
 ESP32 GPIO는 3.3V 신호다. 사용하는 TB6600 모듈의 PUL/DIR/ENA 입력이 3.3V 신호를 확실히 인식하는지 데이터시트나 실제 입력 회로를 확인한다. 모터 전원과 USB 5V를 직접 연결하지 않는다. TB6600 신호 연결 방식에 맞는 공통 기준과 절연 입력 배선을 사용한다.
+
+HC-SR04는 5V로 동작하며 ECHO도 5V로 출력한다. `ECHO → 1kΩ → GPIO33`으로 연결하고
+`GPIO33 → 2kΩ → GND`를 추가하여 약 3.3V로 낮춘다. ECHO를 ESP32 또는 Raspberry Pi
+GPIO에 직접 연결하지 않는다. 펌웨어는 인터럽트로 ECHO 폭을 측정하므로 모터 STEP
+발생 루프를 `pulseIn()`으로 막지 않는다.
 
 ## encoder 없는 동작
 
@@ -23,6 +33,12 @@ ESP32 GPIO는 3.3V 신호다. 사용하는 TB6600 모듈의 PUL/DIR/ENA 입력�
 
 ```text
 ENC,<millis>,<left_virtual_count>,<right_virtual_count>
+```
+
+전면 초음파 거리는 200ms 텔레메트리에 다음 형식으로 함께 전송된다.
+
+```text
+US,<millis>,<distance_m>,<valid_0_or_1>
 ```
 
 이 값은 명령한 pulse의 누적값이지 실제 바퀴 회전 측정값은 아니다. 탈조, 미끄러짐, 바퀴 걸림은 검출하지 못하므로 SLAM/내비게이션의 최종 odometry로 사용하지 않는다.

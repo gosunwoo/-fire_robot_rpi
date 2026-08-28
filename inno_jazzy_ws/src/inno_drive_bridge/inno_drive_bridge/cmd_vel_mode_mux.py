@@ -58,6 +58,7 @@ class CmdVelModeMux(Node):
             3: 'MMWAVE_OBSTACLE_INSPECTION',
             4: 'CAMERA_LIDAR_SURVIVOR_INSPECTION',
             5: 'EVACUATION_DEMO',
+            6: 'SMOKE_AUXILIARY_DRIVE',
         }
         label = labels[self.mode]
         self.status.publish(String(data=f'{self.mode}:{label}'))

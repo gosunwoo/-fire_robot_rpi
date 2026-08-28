@@ -43,6 +43,7 @@ setup(
             'skid_path_follower = inno_autonav.skid_path_follower:main',
             'waypoint_queue = inno_autonav.waypoint_queue:main',
             'mode5_route_preview = inno_autonav.mode5_route_preview:main',
+            'mode6_smoke_assist = inno_autonav.mode6_smoke_assist:main',
         ],
     },
 )

@@ -1,0 +1,211 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 35; 35; 35
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Ground Grid
+      Enabled: true
+      Cell Size: 1
+      Plane: XY
+      Plane Cell Count: 20
+      Color: 100; 100; 100
+      Alpha: 0.5
+    - Class: rviz_default_plugins/Map
+      Name: SLAM Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+      Color Scheme: map
+      Alpha: 0.8
+      Draw Behind: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Normal LiDAR Scan (Red)
+      Enabled: true
+      Topic:
+        Value: /scan_rviz_red
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: FlatColor
+      Color: 255; 0; 0
+      Decay Time: 0
+      Position Transformer: XYZ
+    - Class: rviz_default_plugins/LaserScan
+      Name: Smoke Assist LiDAR Scan (Blue)
+      Enabled: true
+      Topic:
+        Value: /scan_rviz_blue
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: FlatColor
+      Color: 0; 120; 255
+      Decay Time: 0
+      Position Transformer: XYZ
+    - Class: rviz_default_plugins/Range
+      Name: Front HC-SR04 Range
+      Enabled: true
+      Topic:
+        Value: /ultrasonic/front/range
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Color: 255; 170; 0
+      Alpha: 0.5
+      Buffer Length: 1
+    - Class: rviz_default_plugins/TF
+      Name: TF Tree
+      Enabled: true
+      Frame Timeout: 15
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Marker Scale: 0.3
+    - Class: rviz_default_plugins/Odometry
+      Name: RF2O Odometry
+      Enabled: true
+      Topic:
+        Value: /odom_rf2o
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Shape:
+        Value: Arrow
+      Keep: 100
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+    - Class: rviz_default_plugins/Path
+      Name: LiDAR Localized Path (Green)
+      Enabled: true
+      Topic:
+        Value: /lidar_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Color: 0; 255; 0
+      Line Style: Lines
+      Line Width: 0.05
+    - Class: rviz_default_plugins/Path
+      Name: Autonomous Planned Path (Blue)
+      Enabled: true
+      Topic:
+        Value: /planned_path
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+      Color: 0; 100; 255
+      Line Style: Lines
+      Line Width: 0.07
+    - Class: rviz_default_plugins/Path
+      Name: Recorded Waypoints (Yellow)
+      Enabled: true
+      Topic:
+        Value: /waypoint_queue
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+      Color: 255; 220; 0
+      Line Style: Lines
+      Line Width: 0.10
+    - Class: rviz_default_plugins/PoseArray
+      Name: Recorded Waypoint Arrows (Yellow)
+      Enabled: true
+      Topic:
+        Value: /waypoint_poses
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+      Shape: Arrow (Flat)
+      Color: 255; 220; 0
+      Alpha: 1
+    - Class: rviz_default_plugins/Map
+      Name: Live Planning Grid
+      Enabled: true
+      Topic:
+        Value: /planning_grid
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+      Color Scheme: costmap
+      Alpha: 0.30
+      Draw Behind: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Dynamic Obstacles
+      Enabled: true
+      Topic:
+        Value: /dynamic_obstacle_markers
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Waypoint Numbers and Active Target
+      Enabled: true
+      Topic:
+        Value: /waypoint_markers
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Current Waypoint Route (Cyan)
+      Enabled: true
+      Topic:
+        Value: /waypoint_route_markers
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+  Enabled: true
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /waypoint_click
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Top Down
+      Angle: 0
+      Scale: 20
+      X: 0
+      Y: 0
+Window Geometry:
+  Height: 900
+  Width: 1400

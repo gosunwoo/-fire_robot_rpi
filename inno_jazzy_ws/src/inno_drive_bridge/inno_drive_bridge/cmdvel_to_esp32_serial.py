@@ -6,6 +6,7 @@ import rclpy
 import serial
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from sensor_msgs.msg import Range
 from std_msgs.msg import Int32, Int64MultiArray, String
 
 
@@ -25,6 +26,10 @@ class CmdVelToEsp32Serial(Node):
             'right_sign': 1,
             'cmd_timeout_sec': 0.5,
             'repeat_error_interval_sec': 30.0,
+            'ultrasonic_frame': 'ultrasonic_front',
+            'ultrasonic_field_of_view_rad': 0.261799,
+            'ultrasonic_min_range_m': 0.02,
+            'ultrasonic_max_range_m': 4.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -47,6 +52,18 @@ class CmdVelToEsp32Serial(Node):
         self.repeat_error_interval = float(
             self.get_parameter('repeat_error_interval_sec').value
         )
+        self.ultrasonic_frame = str(
+            self.get_parameter('ultrasonic_frame').value
+        )
+        self.ultrasonic_field_of_view = float(
+            self.get_parameter('ultrasonic_field_of_view_rad').value
+        )
+        self.ultrasonic_min_range = float(
+            self.get_parameter('ultrasonic_min_range_m').value
+        )
+        self.ultrasonic_max_range = float(
+            self.get_parameter('ultrasonic_max_range_m').value
+        )
         self._validate_parameters()
 
         self.status_publisher = self.create_publisher(
@@ -60,6 +77,9 @@ class CmdVelToEsp32Serial(Node):
         )
         self.right_motor_publisher = self.create_publisher(
             Int32, '/motor/right_steps_per_sec', 10
+        )
+        self.ultrasonic_publisher = self.create_publisher(
+            Range, '/ultrasonic/front/range', 10
         )
         self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_callback, 10)
 
@@ -119,6 +139,13 @@ class CmdVelToEsp32Serial(Node):
             )
         if self.left_sign not in (-1, 1) or self.right_sign not in (-1, 1):
             raise ValueError('left_sign and right_sign must be either -1 or 1')
+        if (
+            not self.ultrasonic_frame
+            or self.ultrasonic_field_of_view <= 0.0
+            or self.ultrasonic_min_range <= 0.0
+            or self.ultrasonic_max_range <= self.ultrasonic_min_range
+        ):
+            raise ValueError('ultrasonic frame, FOV, and range limits are invalid')
 
     def _cmd_vel_callback(self, message):
         self._last_cmd_time = time.monotonic()
@@ -219,9 +246,35 @@ class CmdVelToEsp32Serial(Node):
             self.ticks_publisher.publish(message)
             return
 
-        if message_type == 'ENC_ABS' and len(fields) >= 8:
+        if message_type == 'ENC_ABS' and len(fields) >= 6:
             # Accept the absolute-encoder format without noisy console output.
             self._publish_status(line)
+            return
+
+        if message_type == 'US' and len(fields) == 4:
+            try:
+                measured_distance = float(fields[2])
+                valid = int(fields[3]) == 1
+            except ValueError:
+                self.get_logger().warning(f'Malformed US message: {line}')
+                return
+            message = Range()
+            message.header.stamp = self.get_clock().now().to_msg()
+            message.header.frame_id = self.ultrasonic_frame
+            message.radiation_type = Range.ULTRASOUND
+            message.field_of_view = self.ultrasonic_field_of_view
+            message.min_range = self.ultrasonic_min_range
+            message.max_range = self.ultrasonic_max_range
+            if (
+                valid
+                and math.isfinite(measured_distance)
+                and self.ultrasonic_min_range <= measured_distance
+                and measured_distance <= self.ultrasonic_max_range
+            ):
+                message.range = measured_distance
+            else:
+                message.range = math.inf
+            self.ultrasonic_publisher.publish(message)
             return
 
         if message_type == 'ERR':

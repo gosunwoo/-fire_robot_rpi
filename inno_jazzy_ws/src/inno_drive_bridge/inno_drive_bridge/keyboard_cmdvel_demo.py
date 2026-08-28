@@ -22,9 +22,11 @@ class KeyboardCmdVelDemo(Node):
         self.declare_parameter('angular_speed', 0.35)
         self.declare_parameter('publish_rate_hz', 10.0)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel_keyboard')
+        self.declare_parameter('mode6_enabled', False)
 
         self.linear_speed = float(self.get_parameter('linear_speed').value)
         self.angular_speed = float(self.get_parameter('angular_speed').value)
+        self.mode6_enabled = bool(self.get_parameter('mode6_enabled').value)
         publish_rate = float(self.get_parameter('publish_rate_hz').value)
         if publish_rate <= 0.0:
             raise ValueError('publish_rate_hz must be greater than zero')
@@ -61,6 +63,9 @@ class KeyboardCmdVelDemo(Node):
         self.inspection_command_publisher = self.create_publisher(
             String, '/obstacle_inspection_command', 10
         )
+        self.mode6_toggle_publisher = self.create_publisher(
+            Empty, '/mode6/toggle', 10
+        )
         self.drive_mode = 1
         self.create_subscription(
             Int32, '/drive_mode', self._external_drive_mode, 10
@@ -81,6 +86,7 @@ class KeyboardCmdVelDemo(Node):
             'Keyboard ready: 1=manual, 2=select named waypoints, '
             '3=mmWave inspection, 4=camera+LiDAR inspection, '
             '5=automatic evacuation demo, '
+            '6=smoke auxiliary driving, '
             'SPACE=start/next, '
             'c=cancel mission, w/x/a/d/s, q=quit'
         )
@@ -159,6 +165,8 @@ class KeyboardCmdVelDemo(Node):
         self.command = Twist()
         if new_mode == 5:
             self.get_logger().info('MODE 5: EVACUATION_DEMO selected externally')
+        elif new_mode == 6:
+            self.get_logger().info('MODE 6: SMOKE_AUXILIARY_DRIVE selected externally')
 
     def _set_speed_parameters(self, parameters):
         linear_speed = self.linear_speed
@@ -197,15 +205,24 @@ class KeyboardCmdVelDemo(Node):
 
         command = Twist()
         label = None
-        if key in ('1', '2', '3', '4', '5'):
-            previous_mode = self.drive_mode
-            self.autonomy_cancel_publisher.publish(Empty())
-            # Clear any stale planner goal before selecting/reselecting the
-            # autonomous velocity source.
-            if previous_mode == 2 or key == '2':
-                self.waypoint_command_publisher.publish(
-                    String(data='MODE2_CANCEL')
+        if key in ('1', '2', '3', '4', '5', '6'):
+            if key == '6' and not self.mode6_enabled:
+                self.get_logger().warning(
+                    'MODE 6 is disabled. Launch with mode6_enabled:=true.'
                 )
+                return
+            previous_mode = self.drive_mode
+            # MODE 6 is an overlay for a route already started in MODE 2. It
+            # deliberately keeps the active goal and path. Every other mode
+            # selection preserves the original cancel-before-switch behavior.
+            if key != '6':
+                self.autonomy_cancel_publisher.publish(Empty())
+                # Clear any stale planner goal before selecting/reselecting the
+                # autonomous velocity source.
+                if previous_mode in (2, 6) or key == '2':
+                    self.waypoint_command_publisher.publish(
+                        String(data='MODE2_CANCEL')
+                    )
             self.drive_mode = int(key)
             self.command = command
             self._publish_command()
@@ -218,8 +235,10 @@ class KeyboardCmdVelDemo(Node):
                 label = 'MODE 3: MMWAVE OBSTACLE INSPECTION'
             elif self.drive_mode == 4:
                 label = 'MODE 4: CAMERA + LIDAR SURVIVOR INSPECTION'
-            else:
+            elif self.drive_mode == 5:
                 label = 'MODE 5: AUTOMATIC EVACUATION DEMO'
+            else:
+                label = 'MODE 6: SMOKE AUXILIARY DRIVE (SPACE=TOGGLE)'
             self.get_logger().info(label)
             if self.drive_mode == 2:
                 self._begin_waypoint_input()
@@ -240,13 +259,19 @@ class KeyboardCmdVelDemo(Node):
                     f'MODE {self.drive_mode} requested nearest-obstacle inspection'
                 )
                 return
+            if self.drive_mode == 6:
+                self.mode6_toggle_publisher.publish(Empty())
+                self.get_logger().info(
+                    'MODE 6 smoke auxiliary driving toggle requested'
+                )
+                return
             if self.drive_mode == 1:
                 self.get_logger().warning(
-                    'Select MODE 2, 3, or 4 before pressing Space.'
+                    'Select MODE 2, 3, 4, or 6 before pressing Space.'
                 )
             return
         if key == 'c':
-            if self.drive_mode in (2, 3, 4, 5):
+            if self.drive_mode in (2, 3, 4, 5, 6):
                 cancelled_mode = self.drive_mode
                 self._stop_all_motion()
                 self.get_logger().warning(
@@ -302,7 +327,7 @@ class KeyboardCmdVelDemo(Node):
     def _stop_all_motion(self):
         """Select the manual source and publish zero even from auto modes."""
         self.autonomy_cancel_publisher.publish(Empty())
-        if self.drive_mode == 2:
+        if self.drive_mode in (2, 6):
             self.waypoint_command_publisher.publish(
                 String(data='MODE2_CANCEL')
             )

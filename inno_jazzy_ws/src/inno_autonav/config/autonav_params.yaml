@@ -25,7 +25,7 @@ dynamic_obstacle_layer:
     # close frontal window becomes a navigation obstacle in Mode 5. Mode 2 is
     # waypoint-only, while Mode 3/4 suppress avoidance so they can approach the
     # one target locked by the inspection orchestrator.
-    avoidance_enabled_modes: [5]
+    avoidance_enabled_modes: [5, 6]
     avoidance_max_range_m: 1.00
     avoidance_front_half_angle_deg: 45.0
     person_match_radius_m: 0.75
@@ -34,6 +34,11 @@ dynamic_obstacle_layer:
     person_track_stale_sec: 1.50
     person_track_max_speed_mps: 1.80
     person_classification_timeout_sec: 0.0
+    ultrasonic_topic: /ultrasonic/front/range
+    ultrasonic_assist_topic: /mode6/smoke_assist_active
+    ultrasonic_enabled_modes: [6]
+    ultrasonic_stop_distance_m: 0.80
+    ultrasonic_obstacle_timeout_sec: 3.0
     publish_rate_hz: 5.0
 
 mode3_inspector:
@@ -253,6 +258,13 @@ skid_path_follower:
     # when replan_supervisor_node is disabled or not launched.
     replan_hold_topic: /replanning/hold
     survivor_follow_hold_topic: /survivor_follow_hold
+    mode6_active_topic: /mode6/smoke_assist_active
+    mode6_safety_hold_topic: /mode6/safety_hold
+    mode6_obstacle_topic: /mode6/ultrasonic_obstacle
+    mode6_imu_topic: /imu/data
+    mode6_imu_timeout_sec: 1.0
+    mode6_initial_stop_sec: 0.50
+    mode6_use_imu_heading: true
 
 replan_supervisor_node:
   ros__parameters:

@@ -20,6 +20,10 @@ cmdvel_to_esp32_serial:
     left_sign: -1
     right_sign: 1
     cmd_timeout_sec: 0.5
+    ultrasonic_frame: ultrasonic_front
+    ultrasonic_field_of_view_rad: 0.261799
+    ultrasonic_min_range_m: 0.02
+    ultrasonic_max_range_m: 4.0
 
 step_count_to_odom:
   ros__parameters:

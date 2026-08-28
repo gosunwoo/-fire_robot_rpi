@@ -12,6 +12,7 @@
   ESP32 -> Pi: ACK,<seq> | STAT,<ms>,<state>,<left_sps>,<right_sps>
                   | ENC,<ms>,<generated_left_steps>,<generated_right_steps>
                   | ENC_ABS,<ms>,<angle_deg>,<turns>,<distance_m>
+                  | US,<ms>,<distance_m>,<valid>
 */
 
 #define L_STEP 25
@@ -26,6 +27,11 @@
 #define ENC_MOSI 23
 #define ENC_MISO 19
 #define ENC_LEFT_CS 17
+
+// Front HC-SR04. ECHO is a 5 V signal: use a 1 kOhm series resistor and a
+// 2 kOhm resistor from GPIO33 to GND. Never wire ECHO directly to the ESP32.
+#define ULTRASONIC_TRIG 32
+#define ULTRASONIC_ECHO 33
 
 const bool ENABLE_ACTIVE_LOW = true;
 const bool INVERT_LEFT_DIR = false;
@@ -47,6 +53,10 @@ const int32_t AS5048A_COUNTS_PER_REV = 16384;
 const int32_t AS5048A_HALF_COUNTS = AS5048A_COUNTS_PER_REV / 2;
 const unsigned long ENCODER_SAMPLE_PERIOD_US = 10000;  // 100 Hz
 const uint32_t ENCODER_SPI_HZ = 1000000;               // reliable starting speed
+const unsigned long ULTRASONIC_TRIGGER_PERIOD_US = 60000;
+const unsigned long ULTRASONIC_ECHO_TIMEOUT_US = 30000;
+const float ULTRASONIC_MIN_RANGE_M = 0.02F;
+const float ULTRASONIC_MAX_RANGE_M = 4.00F;
 
 // User-requested wheel diameter: 10 mm.
 // If the actual wheel is 10 cm, change this value to 100.0F.
@@ -75,6 +85,29 @@ uint16_t rawAngle = 0;
 uint16_t previousRaw = 0;
 int64_t cumulativeCounts = 0;
 uint32_t encoderErrors = 0;
+
+portMUX_TYPE ultrasonicMux = portMUX_INITIALIZER_UNLOCKED;
+volatile unsigned long ultrasonicEchoRiseUs = 0;
+volatile unsigned long ultrasonicEchoDurationUs = 0;
+volatile bool ultrasonicEchoReady = false;
+unsigned long lastUltrasonicTriggerUs = 0;
+bool ultrasonicWaitingForEcho = false;
+float ultrasonicDistanceM = NAN;
+bool ultrasonicValid = false;
+
+void IRAM_ATTR onUltrasonicEchoChange() {
+  const unsigned long nowUs = micros();
+  if (digitalRead(ULTRASONIC_ECHO) == HIGH) {
+    ultrasonicEchoRiseUs = nowUs;
+    return;
+  }
+  if (ultrasonicEchoRiseUs == 0) return;
+  portENTER_CRITICAL_ISR(&ultrasonicMux);
+  ultrasonicEchoDurationUs = nowUs - ultrasonicEchoRiseUs;
+  ultrasonicEchoReady = true;
+  portEXIT_CRITICAL_ISR(&ultrasonicMux);
+  ultrasonicEchoRiseUs = 0;
+}
 
 void setEnable(bool enabled) {
   const int active = ENABLE_ACTIVE_LOW ? LOW : HIGH;
@@ -229,6 +262,50 @@ void updateEncoders() {
   }
 }
 
+void updateUltrasonic() {
+  unsigned long durationUs = 0;
+  bool echoReady = false;
+  portENTER_CRITICAL(&ultrasonicMux);
+  if (ultrasonicEchoReady) {
+    durationUs = ultrasonicEchoDurationUs;
+    ultrasonicEchoReady = false;
+    echoReady = true;
+  }
+  portEXIT_CRITICAL(&ultrasonicMux);
+
+  if (echoReady) {
+    // Round-trip flight time: distance = duration * speed_of_sound / 2.
+    const float measuredM = durationUs * 0.0001715F;
+    ultrasonicValid =
+        measuredM >= ULTRASONIC_MIN_RANGE_M &&
+        measuredM <= ULTRASONIC_MAX_RANGE_M;
+    ultrasonicDistanceM = ultrasonicValid ? measuredM : NAN;
+    ultrasonicWaitingForEcho = false;
+  }
+
+  const unsigned long nowUs = micros();
+  if (
+      ultrasonicWaitingForEcho &&
+      nowUs - lastUltrasonicTriggerUs > ULTRASONIC_ECHO_TIMEOUT_US
+  ) {
+    ultrasonicWaitingForEcho = false;
+    ultrasonicValid = false;
+    ultrasonicDistanceM = NAN;
+  }
+  if (
+      !ultrasonicWaitingForEcho &&
+      nowUs - lastUltrasonicTriggerUs >= ULTRASONIC_TRIGGER_PERIOD_US
+  ) {
+    digitalWrite(ULTRASONIC_TRIG, LOW);
+    delayMicroseconds(2);
+    digitalWrite(ULTRASONIC_TRIG, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(ULTRASONIC_TRIG, LOW);
+    lastUltrasonicTriggerUs = micros();
+    ultrasonicWaitingForEcho = true;
+  }
+}
+
 void zeroEncoderDistance() {
   // ZERO 명령은 누적 이동거리만 0으로 초기화한다.
   // 절대 각도(rawAngle)는 초기화하지 않는다.
@@ -276,6 +353,12 @@ void sendTelemetry() {
       static_cast<unsigned long>(encoderErrors)
     );
   }
+  Serial.printf(
+    "US,%lu,%.4f,%d\n",
+    millis(),
+    ultrasonicValid ? ultrasonicDistanceM : 0.0F,
+    ultrasonicValid ? 1 : 0
+  );
 }
 
 void handleLine(String line) {
@@ -325,12 +408,21 @@ void setup() {
   pinMode(ENC_LEFT_CS, OUTPUT);
   digitalWrite(ENC_LEFT_CS, HIGH);
   SPI.begin(ENC_SCK, ENC_MISO, ENC_MOSI, -1);
+  pinMode(ULTRASONIC_TRIG, OUTPUT);
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+  pinMode(ULTRASONIC_ECHO, INPUT);
+  attachInterrupt(
+    digitalPinToInterrupt(ULTRASONIC_ECHO),
+    onUltrasonicEchoChange,
+    CHANGE
+  );
   delay(20);
 
   emergencyStop();
   lastCommandMs = lastTelemetryMs = millis();
   lastRampUs = micros();
   lastEncoderSampleUs = micros() - ENCODER_SAMPLE_PERIOD_US;
+  lastUltrasonicTriggerUs = micros() - ULTRASONIC_TRIGGER_PERIOD_US;
 
   // Prime the encoder before the first telemetry packet.
   for (int i = 0; i < 3; ++i) {
@@ -353,6 +445,7 @@ void loop() {
   leftMotor.runSpeed();
   rightMotor.runSpeed();
   updateEncoders();
+  updateUltrasonic();
   if (millis() - lastTelemetryMs >= TELEMETRY_PERIOD_MS) {
     lastTelemetryMs = millis();
     sendTelemetry();

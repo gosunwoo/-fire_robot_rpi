@@ -1,6 +1,9 @@
+import math
 import sys
 import unittest
 from pathlib import Path
+
+from builtin_interfaces.msg import Time
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / 'inno_drive_bridge'))
 
@@ -46,6 +49,39 @@ class CmdVelToEsp32SerialParserTest(unittest.TestCase):
 
         self.assertEqual(node.left_motor_publisher.messages[-1].data, -123)
         self.assertEqual(node.right_motor_publisher.messages[-1].data, 456)
+
+    @staticmethod
+    def _ultrasonic_parser_node():
+        node = CmdVelToEsp32Serial.__new__(CmdVelToEsp32Serial)
+        node.logger = DummyLogger()
+        node.ultrasonic_publisher = DummyPublisher()
+        node.ultrasonic_frame = 'ultrasonic_front'
+        node.ultrasonic_field_of_view = 0.261799
+        node.ultrasonic_min_range = 0.02
+        node.ultrasonic_max_range = 4.0
+        node.get_logger = lambda: node.logger
+        node.get_clock = lambda: type('Clock', (), {
+            'now': lambda _self: type('Now', (), {
+                'to_msg': lambda _self: Time(),
+            })(),
+        })()
+        return node
+
+    def test_ultrasonic_telemetry_is_published_as_range(self):
+        node = self._ultrasonic_parser_node()
+
+        node._parse_line('US,12345,0.7500,1')
+
+        message = node.ultrasonic_publisher.messages[-1]
+        self.assertEqual(message.header.frame_id, 'ultrasonic_front')
+        self.assertAlmostEqual(message.range, 0.75)
+
+    def test_invalid_ultrasonic_telemetry_publishes_infinity(self):
+        node = self._ultrasonic_parser_node()
+
+        node._parse_line('US,12345,0.0000,0')
+
+        self.assertTrue(math.isinf(node.ultrasonic_publisher.messages[-1].range))
 
 
 if __name__ == '__main__':

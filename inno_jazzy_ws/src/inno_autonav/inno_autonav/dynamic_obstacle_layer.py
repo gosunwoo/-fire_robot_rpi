@@ -10,7 +10,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Range
 from std_msgs.msg import Bool, Int32
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
@@ -193,9 +193,9 @@ class DynamicObstacleLayer(Node):
             'cluster_radius_m': 0.50,
             'minimum_cluster_cells': 3,
             # Keep long-range candidates for inspection. Avoidance is active in
-            # Mode 5 navigation only; Mode 3/4 must approach the selected target
+            # Mode 5/6 navigation; Mode 3/4 must approach the selected target
             # without simultaneously treating that same target as a detour.
-            'avoidance_enabled_modes': [5],
+            'avoidance_enabled_modes': [5, 6],
             'avoidance_max_range_m': 1.0,
             'avoidance_front_half_angle_deg': 45.0,
             'person_match_radius_m': 0.75,
@@ -204,6 +204,11 @@ class DynamicObstacleLayer(Node):
             'person_track_stale_sec': 1.50,
             'person_track_max_speed_mps': 1.80,
             'person_classification_timeout_sec': 0.0,
+            'ultrasonic_topic': '/ultrasonic/front/range',
+            'ultrasonic_assist_topic': '/mode6/smoke_assist_active',
+            'ultrasonic_enabled_modes': [6],
+            'ultrasonic_stop_distance_m': 0.80,
+            'ultrasonic_obstacle_timeout_sec': 3.0,
             'publish_rate_hz': 5.0,
         }
         for name, value in defaults.items():
@@ -251,6 +256,17 @@ class DynamicObstacleLayer(Node):
         self.person_track_max_speed = float(
             self.get_parameter('person_track_max_speed_mps').value
         )
+        self.ultrasonic_enabled_modes = {
+            int(mode) for mode in self.get_parameter(
+                'ultrasonic_enabled_modes'
+            ).value
+        }
+        self.ultrasonic_stop_distance = float(
+            self.get_parameter('ultrasonic_stop_distance_m').value
+        )
+        self.ultrasonic_timeout = float(
+            self.get_parameter('ultrasonic_obstacle_timeout_sec').value
+        )
         self.person_timeout = float(
             self.get_parameter('person_classification_timeout_sec').value
         )
@@ -271,6 +287,9 @@ class DynamicObstacleLayer(Node):
             or self.person_track_match_radius <= 0.0
             or self.person_track_stale <= 0.0
             or self.person_track_max_speed <= 0.0
+            or not self.ultrasonic_enabled_modes
+            or self.ultrasonic_stop_distance <= 0.0
+            or self.ultrasonic_timeout <= 0.0
             or self.person_timeout < 0.0
         ):
             raise ValueError('confirm_count/rate는 양수이고 반경은 0 이상이어야 합니다.')
@@ -285,6 +304,8 @@ class DynamicObstacleLayer(Node):
         self.person_track_ids: List[int] = []
         self.person_track_velocities: List[Tuple[float, float]] = []
         self.next_person_track_id = 1
+        self.ultrasonic_active = False
+        self.ultrasonic_confirmed: Dict[int, float] = {}
         self.drive_mode = 1
         self._last_published_grid = None
         grid_qos = QoSProfile(depth=1)
@@ -295,6 +316,18 @@ class DynamicObstacleLayer(Node):
         )
         self.create_subscription(LaserScan, self.scan_topic, self._scan_callback, 10)
         self.create_subscription(Int32, '/drive_mode', self._mode_callback, 10)
+        self.create_subscription(
+            Range,
+            str(self.get_parameter('ultrasonic_topic').value),
+            self._ultrasonic_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter('ultrasonic_assist_topic').value),
+            self._ultrasonic_assist_callback,
+            10,
+        )
         self.grid_publisher = self.create_publisher(
             OccupancyGrid, '/dynamic_obstacle_grid', grid_qos
         )
@@ -342,6 +375,45 @@ class DynamicObstacleLayer(Node):
         # Force an empty/full grid update immediately after a mode switch.
         self._last_published_grid = None
 
+    def _ultrasonic_assist_callback(self, message: Bool) -> None:
+        active = bool(message.data)
+        if active == self.ultrasonic_active:
+            return
+        self.ultrasonic_active = active
+        if not active:
+            self.ultrasonic_confirmed.clear()
+        self._last_published_grid = None
+
+    def _ultrasonic_callback(self, message: Range) -> None:
+        if (
+            not self.ultrasonic_active
+            or self.drive_mode not in self.ultrasonic_enabled_modes
+            or self.static_grid is None
+        ):
+            return
+        distance = float(message.range)
+        minimum = max(0.0, float(message.min_range))
+        if (
+            not math.isfinite(distance)
+            or distance < minimum
+            or distance > self.ultrasonic_stop_distance
+        ):
+            return
+        source_frame = message.header.frame_id or self.base_frame
+        transform = self.tf.lookup_transform(self.map_frame, source_frame)
+        if transform is None:
+            return
+        map_x, map_y = self.tf.transform_point_2d(transform, distance, 0.0)
+        grid_x, grid_y = world_to_grid(map_x, map_y, self.static_grid)
+        if not is_inside_grid(grid_x, grid_y, self.static_grid):
+            return
+        # A mapped wall is already blocked by the static layer. Only remember
+        # a new obstacle when ultrasound reports it in known-free space.
+        if int(self.static_grid.data[grid_y, grid_x]) != 0:
+            return
+        index = grid_y * self.static_grid.width + grid_x
+        self.ultrasonic_confirmed[index] = time.monotonic()
+
     def _static_callback(self, message: OccupancyGrid) -> None:
         try:
             incoming = grid_from_message(message)
@@ -367,6 +439,7 @@ class DynamicObstacleLayer(Node):
             self.classified_people.clear()
             self.person_track_ids.clear()
             self.person_track_velocities.clear()
+            self.ultrasonic_confirmed.clear()
             self._last_published_grid = None
             self.get_logger().warning('static grid geometry 변경: dynamic obstacle 초기화')
         self.static_grid = incoming
@@ -421,6 +494,13 @@ class DynamicObstacleLayer(Node):
             for index in expired:
                 self.confirmed.pop(index, None)
                 self.counts.pop(index, None)
+        ultrasonic_cutoff = time.monotonic() - self.ultrasonic_timeout
+        expired_ultrasonic = [
+            index for index, seen_at in self.ultrasonic_confirmed.items()
+            if seen_at < ultrasonic_cutoff
+        ]
+        for index in expired_ultrasonic:
+            self.ultrasonic_confirmed.pop(index, None)
         if self.person_timeout > 0.0:
             person_cutoff = now - self.person_timeout
             self._ensure_person_tracking_state()
@@ -581,6 +661,8 @@ class DynamicObstacleLayer(Node):
     def _avoidance_indices(self) -> Set[int]:
         if self.drive_mode not in self.avoidance_enabled_modes:
             return set()
+        if self.drive_mode == 6 and not self.ultrasonic_active:
+            return set()
         robot = self.tf.lookup_pose_2d(self.map_frame, self.base_frame)
         if robot is None:
             return set()
@@ -612,6 +694,11 @@ class DynamicObstacleLayer(Node):
             return
         self._expire()
         avoidance_indices = self._avoidance_indices()
+        if (
+            self.ultrasonic_active
+            and self.drive_mode in self.ultrasonic_enabled_modes
+        ):
+            avoidance_indices.update(self.ultrasonic_confirmed)
         data = self._dynamic_array(avoidance_indices)
         stamp = self.get_clock().now().to_msg()
         if (
@@ -728,13 +815,14 @@ class DynamicObstacleLayer(Node):
 
     def _clear_callback(self, request, response):
         del request
-        count = len(self.confirmed)
+        count = len(self.confirmed) + len(self.ultrasonic_confirmed)
         self.counts.clear()
         self.confirmed.clear()
         self.current_seen.clear()
         self.classified_people.clear()
         self.person_track_ids.clear()
         self.person_track_velocities.clear()
+        self.ultrasonic_confirmed.clear()
         response.success = True
         response.message = f'{count}개 dynamic obstacle을 삭제했습니다.'
         self.get_logger().warning(response.message)
